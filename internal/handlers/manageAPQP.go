@@ -345,6 +345,8 @@ func GetListAPQPPhase(c *fiber.Ctx, db *sqlx.DB) error {
 			ipid.sd_id AS sd_id,
 			ipid.su_id AS su_id,
 			ipid.ipid_line_code AS ipid_line_code,
+	        ipmp.ipmp_start_date,
+	        ipmp.ipmp_end_date,
 			CASE
                 WHEN ipid.ipid_id IS NOT NULL THEN 1
                     WHEN ipid.ipid_id IS NULL
@@ -360,14 +362,16 @@ func GetListAPQPPhase(c *fiber.Ctx, db *sqlx.DB) error {
 		FROM mst_apqp ma
 		LEFT JOIN info_apqp_item iai ON iai.iai_name = ma.ma_name AND iai.ip_id = ?
 		LEFT JOIN info_project_item_detail ipid ON ipid.ref_id = iai.iai_id AND ipid.ipid_type = 'apqp'
-		LEFT JOIN mst_master_plan_detail mmpd ON mmpd.ma_id = ma.ma_id
+		LEFT JOIN mst_master_plan_detail mmpd ON mmpd.ma_id = ma.ma_id AND mmpd.mmpd_status = 'active'
 		LEFT JOIN mst_template_detail mtd ON mmpd.mmp_id = mtd.mmp_id AND mmpd.mmp_id IN (?) AND mtd.mt_id = (SELECT mt_id FROM info_project WHERE ip_id = ?)
+        LEFT JOIN mst_master_plan mmp ON mmpd.mmp_id = mmp.mmp_id
+        LEFT JOIN info_project_master_plan ipmp ON ipmp.ipmp_name = mmp.mmp_name AND ipmp.ip_id = ?
 		AND ma.ma_status = 'active'
 		GROUP BY mmpd.ma_id, ma.ma_name, ma.mpp_id, ma.ma_id, ipid.ipid_start_date, ipid.ipid_end_date, ipid.sd_id, ipid.su_id, ipid.ipid_line_code
 		ORDER BY ma.mpp_id, ma.ma_id ASC
 	`
 
-	q, args, err := sqlx.In(query, ipID, ipID, ids, ipID)
+	q, args, err := sqlx.In(query, ipID, ipID, ids, ipID, ipID)
 	if err != nil {
 		return c.Status(500).JSON(5)
 	}
@@ -383,6 +387,8 @@ func GetListAPQPPhase(c *fiber.Ctx, db *sqlx.DB) error {
 		SdID          utils.NullInt64  `db:"sd_id" json:"sd_id"`
 		SuID          utils.NullInt64  `db:"su_id" json:"su_id"`
 		IpidLineCode  utils.NullString `db:"ipid_line_code" json:"ipid_line_code"`
+		IpmpStartDate *time.Time       `db:"ipmp_start_date" json:"ipmp_start_date"`
+		IpmpEndDate   *time.Time       `db:"ipmp_end_date" json:"ipmp_end_date"`
 		Status        int              `db:"status" json:"status"`
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"apiTrackingSystem/config"
 	"apiTrackingSystem/database"
+	"apiTrackingSystem/internal/handlers"
 	"apiTrackingSystem/internal/routes"
 
 	"github.com/gofiber/fiber/v2"
@@ -35,11 +36,17 @@ func main() {
 
 	// CORS middleware - allow browser origin to call this API
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://192.168.161.205:4009",
+		AllowOrigins:     "http://192.168.161.205:4001",
 		AllowMethods:     "GET,POST,HEAD,PUT,DELETE,OPTIONS",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
 		AllowCredentials: true,
 	}))
+
+	// Start background scheduler: marks overdue items as 'delay' at midnight
+	handlers.StartDelayStatusScheduler(db)
+
+	// Start background scheduler: sends tracking email every Mon/Wed/Fri at 08:00
+	handlers.StartSendMailScheduler(db)
 
 	// Setup all routes (pass db)
 	routes.Setup(app, db)

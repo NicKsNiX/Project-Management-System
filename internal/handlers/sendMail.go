@@ -122,20 +122,6 @@ func SendMail(to []string, subject, body, contentType string) error {
 	return nil
 }
 
-func SendMailTest(c *fiber.Ctx) error {
-	_ = godotenv.Load(".env")
-	// force the test to send from admin_pcsystem@tbkk.co.th to noraphat_j@tbkk.co.th
-	_ = os.Setenv("SMTP_FROM", "admin_pcsystem@tbkk.co.th")
-	to := []string{"noraphat_j@tbkk.co.th"}
-	subject := "Project Management"
-	body := "<html><body><h1>You have project to approve</h1><p>Please review and approve the project.</p></body></html>"
-
-	if err := SendMail(to, subject, body, "text/html; charset=utf-8"); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "failed to send email", "detail": err.Error()})
-	}
-	return c.Status(200).JSON(fiber.Map{"message": "test email sent successfully"})
-}
-
 // SendMailWithAttachment sends an email with a single attachment (xlsx or other binary).
 func SendMailWithAttachment(to []string, subject, body, contentType, attachmentName string, attachmentData []byte) error {
 	_ = godotenv.Load(".env")
@@ -578,8 +564,9 @@ func writeProjectBlock(
 // SendMailAuto Function
 // ============================================================================
 
-func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
-
+// RunSendMailAuto contains the core send-mail logic so it can be called by
+// both the HTTP handler and the background scheduler.
+func RunSendMailAuto(db *sqlx.DB) error {
 	sqlQuery := `SELECT
 					ip.ip_code,
 					ip.ip_part_name,
@@ -654,10 +641,11 @@ func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
 
 	var rows []MailData
 	if err := db.Select(&rows, sqlQuery); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "failed to query data", "detail": err.Error()})
+		return fmt.Errorf("failed to query data: %w", err)
 	}
 	if len(rows) == 0 {
-		return c.Status(200).JSON(fiber.Map{"message": "no data to send"})
+		log.Println("[sendMail] SendMailAuto: no data to send")
+		return nil
 	}
 
 	// Get all active users with email addresses
@@ -666,10 +654,11 @@ func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 	var users []User
 	if err := db.Select(&users, `SELECT su_email FROM sys_user WHERE su_status = 'active' AND su_email IS NOT NULL AND su_email <> '' ORDER BY su_email`); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "failed to query users", "detail": err.Error()})
+		return fmt.Errorf("failed to query users: %w", err)
 	}
 	if len(users) == 0 {
-		return c.Status(200).JSON(fiber.Map{"message": "no active users with email found"})
+		log.Println("[sendMail] SendMailAuto: no active users with email found")
+		return nil
 	}
 
 	// Extract email list
@@ -697,7 +686,7 @@ func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
 	// Build styles upfront
 	baseStyle, titleStyle, headerStyle, stDone, stDelay, stInprog, stWaiting, stReject, err := buildStyles(f)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "failed to build styles", "detail": err.Error()})
+		return fmt.Errorf("failed to build styles: %w", err)
 	}
 
 	// Group items by model -> ip_code
@@ -773,7 +762,7 @@ func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
 
 	var buf bytes.Buffer
 	if _, err := f.WriteTo(&buf); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "failed to write excel file", "detail": err.Error()})
+		return fmt.Errorf("failed to write excel file: %w", err)
 	}
 
 	// Send to all active users
@@ -781,10 +770,19 @@ func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
 	attachName := "TrackingProjects.xlsx"
 	body := "Please find attached the project items in Excel format."
 	if err := SendMailWithAttachment(emailList, subject, body, "text/plain; charset=utf-8", attachName, buf.Bytes()); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "failed to send email", "detail": err.Error()})
+		return fmt.Errorf("failed to send email: %w", err)
 	}
 
-	return c.Status(200).JSON(fiber.Map{"sent": 1, "recipients": len(emailList), "message": "Email sent to all active users"})
+	log.Printf("[sendMail] SendMailAuto: email sent to %d recipient(s)", len(emailList))
+	return nil
+}
+
+// SendMailAuto is the HTTP handler wrapper for RunSendMailAuto.
+func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
+	if err := RunSendMailAuto(db); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(200).JSON(fiber.Map{"success": true, "message": "Email sent to all active users"})
 }
 
 func getStringValue(ns sql.NullString) string {

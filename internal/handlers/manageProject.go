@@ -1576,71 +1576,71 @@ func GetinfoGanttchart(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 
 	query := `SELECT
-    COALESCE(mpp.mpp_order, 6) AS mpp_order,
-    COALESCE(mpp.mpp_name, 'Customer PPAP Status') AS mpp_name,
-    iai.iai_name,
-    ipid.ipid_start_date,
-    ipid.ipid_end_date,
-    ipid.ipid_status,
-    GROUP_CONCAT(
-        COALESCE(sd.sd_dept_aname, '-')
-        ORDER BY
-        su.su_firstname SEPARATOR ' / '
-    ) AS sd_dept_aname,
-    GROUP_CONCAT(
-        COALESCE(su.su_firstname, '-')
-        ORDER BY
-        su.su_firstname SEPARATOR ' / '
-    ) AS su_firstname
-FROM
-    info_project AS ip
-    LEFT JOIN info_apqp_item AS iai ON ip.ip_id = iai.ip_id
-    LEFT JOIN mst_project_phase AS mpp ON iai.mpp_id = mpp.mpp_id
-    LEFT JOIN info_project_item_detail AS ipid ON iai.iai_id = ipid.ref_id AND ipid.ipid_type = 'apqp'
-    LEFT JOIN sys_department AS sd ON sd.sd_id = ipid.sd_id
-    LEFT JOIN sys_user AS su ON su.su_id = ipid.su_id
-WHERE
-    ip.ip_id = ?
-GROUP BY
-    mpp.mpp_order,
-    mpp.mpp_name,
-    iai.iai_name,
-    ipid.ipid_start_date,
-    ipid.ipid_end_date,
-    ipid.ipid_status
+				mpp.mpp_order,
+				mpp.mpp_name,
+				iai.iai_name,
+				MIN(ipid.ipid_start_date) AS ipid_start_date,
+				MAX(ipid.ipid_end_date)   AS ipid_end_date,
+				MAX(ipid.ipid_status)     AS ipid_status,
+				CASE 
+				WHEN COUNT(ipid.ref_id) = 0 THEN NULL
+				ELSE GROUP_CONCAT(DISTINCT COALESCE(sd.sd_dept_aname, '-') ORDER BY sd.sd_dept_aname SEPARATOR ' / ')
+				END AS sd_dept_aname,
+				
+				CASE 
+				WHEN COUNT(ipid.ref_id) = 0 THEN NULL
+				ELSE GROUP_CONCAT(DISTINCT COALESCE(su.su_firstname, '-') ORDER BY su.su_firstname SEPARATOR ' / ')
+				END AS su_firstname
+			FROM info_project AS ip
+			LEFT JOIN info_apqp_item AS iai 
+				ON ip.ip_id = iai.ip_id
+			LEFT JOIN mst_project_phase AS mpp 
+				ON iai.mpp_id = mpp.mpp_id
+			LEFT JOIN info_project_item_detail AS ipid 
+				ON iai.iai_id = ipid.ref_id 
+			AND ipid.ipid_type = 'apqp'
+			LEFT JOIN sys_department AS sd 
+				ON sd.sd_id = ipid.sd_id
+			LEFT JOIN sys_user AS su 
+				ON su.su_id = ipid.su_id
+			WHERE ip.ip_id = ?
+			GROUP BY
+				mpp.mpp_order,
+				mpp.mpp_name,
+				iai.iai_name
 
-UNION ALL
+			UNION ALL
 
-SELECT
-    6 AS mpp_order,
-    'Customer PPAP Status' AS mpp_name,
-    ipi.ipi_name AS iai_name,
-    ipid.ipid_start_date,
-    ipid.ipid_end_date,
-    ipid.ipid_status,
-    GROUP_CONCAT(
-        COALESCE(sd.sd_dept_aname, '-')
-        ORDER BY
-        su.su_firstname SEPARATOR ' / '
-    ) AS sd_dept_aname,
-    GROUP_CONCAT(
-        COALESCE(su.su_firstname, '-')
-        ORDER BY
-        su.su_firstname SEPARATOR ' / '
-    ) AS su_firstname
-FROM
-    info_project AS ip
-    LEFT JOIN info_ppap_item AS ipi ON ip.ip_id = ipi.ip_id
-    LEFT JOIN info_project_item_detail AS ipid ON ipi.ipi_id = ipid.ref_id AND ipid.ipid_type = 'ppap'
-    LEFT JOIN sys_department AS sd ON sd.sd_id = ipid.sd_id
-    LEFT JOIN sys_user AS su ON su.su_id = ipid.su_id
-WHERE
-    ip.ip_id = ?
-GROUP BY
-    ipi.ipi_name,
-    ipid.ipid_start_date,
-    ipid.ipid_end_date,
-    ipid.ipid_status;`
+			SELECT
+				6 AS mpp_order,
+				'Customer PPAP Status' AS mpp_name,
+				ipi.ipi_name AS iai_name,
+				MIN(ipid.ipid_start_date) AS ipid_start_date,
+				MAX(ipid.ipid_end_date)   AS ipid_end_date,
+				MAX(ipid.ipid_status)     AS ipid_status,
+				CASE 
+				WHEN COUNT(ipid.ref_id) = 0 THEN NULL
+				ELSE GROUP_CONCAT(DISTINCT COALESCE(sd.sd_dept_aname, '-') ORDER BY sd.sd_dept_aname SEPARATOR ' / ')
+				END AS sd_dept_aname,
+				
+				CASE 
+				WHEN COUNT(ipid.ref_id) = 0 THEN NULL
+				ELSE GROUP_CONCAT(DISTINCT COALESCE(su.su_firstname, '-') ORDER BY su.su_firstname SEPARATOR ' / ')
+				END AS su_firstname
+			FROM info_project AS ip
+			LEFT JOIN info_ppap_item AS ipi 
+				ON ip.ip_id = ipi.ip_id
+			LEFT JOIN info_project_item_detail AS ipid 
+				ON ipi.ipi_id = ipid.ref_id 
+			AND ipid.ipid_type = 'ppap'
+			LEFT JOIN sys_department AS sd 
+				ON sd.sd_id = ipid.sd_id
+			LEFT JOIN sys_user AS su 
+				ON su.su_id = ipid.su_id
+			WHERE ip.ip_id = ?
+			AND ipi.ipi_name IS NOT NULL
+			GROUP BY
+				ipi.ipi_name;`
 
 	if err := db.Select(&out, query, ipID, ipID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
@@ -1790,7 +1790,7 @@ func GetListAPQPPPAPItem(c *fiber.Ctx, db *sqlx.DB) error {
 					ON a.ipid_id = x.ipid_id AND a.ia_is_action = 1
 				LEFT JOIN sys_user su
 					ON su.su_id = x.owner_su_id
-				GROUP BY x.ref_id
+				GROUP BY x.ref_id,x.item_type
 				ORDER BY
 					x.item_name ASC,
 					x.item_type ASC,

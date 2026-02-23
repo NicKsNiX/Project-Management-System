@@ -153,6 +153,9 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Get("/apiTrackingSystem/dashboard/ListInprogressProjects", func(c *fiber.Ctx) error { return handlers.ListInprogressProjects(c, db) })
 	app.Get("/apiTrackingSystem/dashboard/MasterPlanSummary", func(c *fiber.Ctx) error { return handlers.ListMasterPlanSummary(c, db) })
 
+	// Task automation
+	app.Post("/apiTrackingSystem/task/triggerDelayCheck", func(c *fiber.Ctx) error { return handlers.TriggerDelayCheck(c, db) })
+
 	app.Static("/uploads", `C:\inetpub\wwwroot\apiTrackingSystemUat\uploads`)
 }
 

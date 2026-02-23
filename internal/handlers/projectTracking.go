@@ -228,7 +228,7 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					CASE
 						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND ipid_status = 'done' AND tf.itf_file_path IS NOT NULL THEN 8
 						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND tf.itf_file_path IS NOT NULL THEN 7
-                        WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL THEN 5
+                        WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL THEN 0
                         WHEN ia.ia_status = 'waiting' AND x.ipid_status = 'waiting' AND ia.ia_type = 'Leader' THEN 1
                         WHEN ia.ia_status = 'Approve' AND x.ipid_status = 'waiting' AND ia.ia_type = 'Leader' THEN 2
                         WHEN ia.ia_status = 'reject' AND ia.ia_type = 'Leader' THEN 3
@@ -324,7 +324,7 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 						JOIN info_project_item_detail pid_sub 
 							ON pid_sub.ipid_id = tf_sub.ipid_id
 						WHERE pid_sub.ref_id = x.ref_id
-						AND pid_sub.sd_id = x.sd_id
+						
 						AND pid_sub.ipid_type = x.item_type
 						LIMIT 1
 					)
