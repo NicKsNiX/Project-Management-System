@@ -113,6 +113,11 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Post("/apiTrackingSystem/manageModel/UpdateModelMaster", func(c *fiber.Ctx) error { return handlers.UpdateModelMaster(c, db) })
 	app.Post("/apiTrackingSystem/manageModel/UpdateModelMasterStatus", func(c *fiber.Ctx) error { return handlers.UpdateModelMasterStatus(c, db) })
 
+	app.Get("/apiTrackingSystem/manageEvent/ListCustomerEvents", func(c *fiber.Ctx) error { return handlers.ListCustomerEvents(c, db) })
+	app.Post("/apiTrackingSystem/manageEvent/InsertCustomerEvent", func(c *fiber.Ctx) error { return handlers.InsertCustomerEvent(c, db) })
+	app.Post("/apiTrackingSystem/manageEvent/UpdateCustomerEvent", func(c *fiber.Ctx) error { return handlers.UpdateCustomerEvent(c, db) })
+	app.Post("/apiTrackingSystem/manageEvent/UpdateCustomerEventStatus", func(c *fiber.Ctx) error { return handlers.UpdateCustomerEventStatus(c, db) })
+
 	app.Get("/apiTrackingSystem/manageProject/ListInfoProjects", func(c *fiber.Ctx) error { return handlers.ListInfoProjects(c, db) })
 	app.Get("/apiTrackingSystem/manageProject/SelectPartNumber", func(c *fiber.Ctx) error { return handlers.SelectPartNumber(c, db) })
 	app.Get("/apiTrackingSystem/manageProject/SelectModel", func(c *fiber.Ctx) error { return handlers.SelectModel(c, db) })
@@ -159,9 +164,10 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Static("/uploads", `C:\inetpub\wwwroot\apiTrackingSystemUat\uploads`)
 }
 
-// http://192.168.161.219:9004/apiTrackingSystem/manageProject/UpdateStatusCompleteProject
-// http://192.168.161.219:9004/apiTrackingSystem/manageModel/InsertModelMaster
-// http://192.168.161.219:9004/apiTrackingSystem/manageModel/UpdateModelMaster
-// http://192.168.161.219:9004/apiTrackingSystem/manageModel/UpdateModelMasterStatus
+// http://192.168.161.219:9004/apiTrackingSystem/manageEvent/ListCustomerEvents
+// http://192.168.161.219:9004/apiTrackingSystem/manageEvent/InsertCustomerEvent
+// http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEvent
+// http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEventStatus
 // docker compose down
 // docker compose up -d --build
+// set GOOS=windows GOARCH=amd64 && go build -o apiTracking.exe .

@@ -24,6 +24,7 @@ type DashboardProject struct {
 // MasterPlanSummary represents aggregated master plan statuses per project
 type MasterPlanSummary struct {
 	IpID                     int64            `db:"ip_id" json:"ip_id"`
+	IpCode                   utils.NullString `db:"ip_code" json:"ip_code"`
 	IpCustomerName           utils.NullString `db:"ip_customer_name" json:"ip_customer_name"`
 	IpModel                  utils.NullString `db:"ip_model" json:"ip_model"`
 	IpPartName               utils.NullString `db:"ip_part_name" json:"ip_part_name"`
@@ -82,6 +83,7 @@ GROUP BY
 func ListMasterPlanSummary(c *fiber.Ctx, db *sqlx.DB) error {
 	query := `SELECT
 	ipmp.ip_id,
+	ip.ip_code,
 	ip.ip_customer_name,
 	ip.ip_model,
 	ip.ip_part_name,

@@ -8,12 +8,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// CheckAndUpdateDelayStatus finds every row in info_project_item_detail whose
-// ipid_end_date has already passed (today > ipid_end_date, i.e. at least 1 day
-// overdue) and whose status is not yet terminal (done / reject / delay), then
-// flips ipid_status to 'delay'.
 func CheckAndUpdateDelayStatus(db *sqlx.DB) error {
-	query := `
+	// ── Step 1: mark overdue detail rows as 'delay' ──────────────────────────
+	queryDetail := `
 		UPDATE info_project_item_detail
 		SET
 			ipid_status     = 'delay',
@@ -25,25 +22,48 @@ func CheckAndUpdateDelayStatus(db *sqlx.DB) error {
 			AND ipid_status NOT IN ('done', 'reject', 'delay')
 	`
 
-	result, err := db.Exec(query)
+	result, err := db.Exec(queryDetail)
 	if err != nil {
 		return err
 	}
-
 	rows, _ := result.RowsAffected()
-	log.Printf("[taskAuto] CheckAndUpdateDelayStatus: updated %d row(s) to 'delay'", rows)
+	log.Printf("[taskAuto] CheckAndUpdateDelayStatus: updated %d info_project_item_detail row(s) to 'delay'", rows)
+
+	queryMasterPlan := `
+		UPDATE info_project_master_plan ipmp
+		INNER JOIN mst_master_plan      mmp   ON mmp.mmp_name  = ipmp.ipmp_name
+		INNER JOIN mst_master_plan_detail mmpd ON mmpd.mmp_id  = mmp.mmp_id
+		INNER JOIN mst_apqp             ma    ON ma.ma_id      = mmpd.ma_id
+		INNER JOIN info_apqp_item       iai   ON iai.iai_name  = ma.ma_name
+		INNER JOIN info_project_item_detail ipid
+			ON  ipid.ref_id      = iai.iai_id
+			AND ipid.ipid_type   = 'apqp'
+			AND ipid.ipid_end_date IS NOT NULL
+			AND ipid.ipid_end_date < CURDATE()
+			AND ipid.ipid_status = 'delay'
+		SET
+			ipmp.ipmp_status = 'delay'
+		WHERE
+			ipmp.ip_id = iai.ip_id
+			AND ipmp.ipmp_status NOT IN ('done', 'reject', 'delay')
+	`
+
+	resultMP, err := db.Exec(queryMasterPlan)
+	if err != nil {
+		return err
+	}
+	rowsMP, _ := resultMP.RowsAffected()
+	log.Printf("[taskAuto] CheckAndUpdateDelayStatus: updated %d info_project_master_plan row(s) to 'delay'", rowsMP)
+
 	return nil
 }
 
-// durationUntilMidnight returns the duration from now until the next 00:00:00.
 func durationUntilMidnight() time.Duration {
 	now := time.Now()
 	next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 1, 0, 0, now.Location())
 	return time.Until(next)
 }
 
-// StartDelayStatusScheduler runs CheckAndUpdateDelayStatus once immediately on
-// startup, then waits until the next midnight (00:00:00) and repeats every day.
 func StartDelayStatusScheduler(db *sqlx.DB) {
 	go func() {
 		// Run once right away on startup
@@ -65,8 +85,6 @@ func StartDelayStatusScheduler(db *sqlx.DB) {
 	}()
 }
 
-// durationUntilNextMailDay returns the duration from now until the next
-// Monday, Wednesday, or Friday at the given hour:minute (24-h clock).
 func durationUntilNextMailDay(hour, minute int) time.Duration {
 	now := time.Now()
 	mailDays := map[time.Weekday]bool{
@@ -86,8 +104,6 @@ func durationUntilNextMailDay(hour, minute int) time.Duration {
 	return 7 * 24 * time.Hour
 }
 
-// StartSendMailScheduler sends the automated project tracking email every
-// Monday, Wednesday, and Friday at 08:00.
 func StartSendMailScheduler(db *sqlx.DB) {
 	go func() {
 		for {
@@ -104,10 +120,6 @@ func StartSendMailScheduler(db *sqlx.DB) {
 	}()
 }
 
-// TriggerDelayCheck is an HTTP handler that lets an authorised caller run the
-// delay-status check on demand.
-//
-// POST /apiTrackingSystem/task/triggerDelayCheck
 func TriggerDelayCheck(c *fiber.Ctx, db *sqlx.DB) error {
 	if err := CheckAndUpdateDelayStatus(db); err != nil {
 		log.Printf("[taskAuto] TriggerDelayCheck error: %v", err)

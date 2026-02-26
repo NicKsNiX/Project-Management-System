@@ -226,7 +226,8 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					x.end_date,
 					ia.ia_note,
 					CASE
-						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND ipid_status = 'done' AND tf.itf_file_path IS NOT NULL THEN 8
+						WHEN x.ipid_status = 'delay' THEN 9
+						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND x.ipid_status = 'done' AND tf.itf_file_path IS NOT NULL THEN 8
 						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND tf.itf_file_path IS NOT NULL THEN 7
                         WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL THEN 0
                         WHEN ia.ia_status = 'waiting' AND x.ipid_status = 'waiting' AND ia.ia_type = 'Leader' THEN 1
