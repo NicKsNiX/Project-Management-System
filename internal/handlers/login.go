@@ -98,8 +98,8 @@ func Login(c *fiber.Ctx, db *sqlx.DB) error {
 	// 		spgID = dbSpg.Int64
 	// 	}
 	// 	// update existing user fields and link department
-	// 	_, err := db.Exec(`UPDATE sys_user SET su_emp_code = ?, su_firstname = ?, su_lastname = ?, su_email = ?, sd_id = ?, su_updated_at = ?, su_updated_by = ? WHERE su_id = ?`,
-	// 		extResp.User.EmployeeID, extResp.User.Name, extResp.User.Surname, extResp.User.Email, sdID, now, extResp.User.EmployeeID, suID)
+	// 	_, err := db.Exec(`UPDATE sys_user SET su_emp_code = ?, su_firstname = ?, su_lastname = ?, su_email = ?, sd_id = ?, spg_id = ?, su_updated_at = ?, su_updated_by = ? WHERE su_id = ?`,
+	// 		extResp.User.EmployeeID, extResp.User.Name, extResp.User.Surname, extResp.User.Email, sdID, spgID, now, extResp.User.EmployeeID, suID)
 	// 	if err != nil {
 	// 		return c.Status(500).JSON(fiber.Map{"error": "failed to update user", "detail": err.Error()})
 	// 	}

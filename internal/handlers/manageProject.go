@@ -241,6 +241,8 @@ type SysInfoProject struct {
 	IceUpdatedAt    *DateTime        `json:"ice_updated_at" db:"ice_updated_at"`
 	IceUpdatedBy    utils.NullString `json:"ice_updated_by" db:"ice_updated_by"`
 
+	MceName utils.NullString `json:"mce_name" db:"mce_name"`
+
 	IpfFileName       utils.NullString `json:"ipf_file_name" db:"ipf_file_name"`
 	IpfFilePath       utils.NullString `json:"ipf_file_path" db:"ipf_file_path"`
 	IpfUpdatedAt      *DateTime        `json:"ipf_updated_at" db:"ipf_updated_at"`
@@ -303,6 +305,7 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 					ice.ice_2pp_end_date AS ice_2pp_end_date,
 					ice.ice_pp_end_date AS ice_pp_end_date,
 					ice.ice_sop_end_date AS ice_sop_end_date,
+					mceAgg.mce_names AS mce_name,
 					IFNULL(itf.tracking_file_count, 0) AS tracking_file_count
 				FROM info_project 
 				LEFT JOIN sys_user su ON ip_updated_by = su_emp_code
@@ -320,10 +323,18 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 					WHERE ia.ia_status = 'waiting' AND ia.ia_type = 'PJ' AND pid.ipid_status = 'waiting'
                     GROUP BY ip_id
 				) itf ON info_project.ip_id = itf.ip_id
+				LEFT JOIN (
+					SELECT
+						mmm_id,
+						GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_name SEPARATOR ', ') AS mce_names
+					FROM mst_customer_event
+					GROUP BY mmm_id
+				) mceAgg
+					ON mmm.mmm_id = mceAgg.mmm_id
 				WHERE 1=1`
 	args := []interface{}{}
 	if status != "" {
-		query += " AND mmm_id = ?"
+		query += " AND mmm.mmm_id = ?"
 		args = append(args, status)
 	}
 	query += " ORDER BY ip_id ASC"
@@ -337,6 +348,13 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 
 func IssueInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 	var req SysInfoProject
+
+	type CustomerEventInput struct {
+		MceID        int64  `json:"mce_id"`
+		IceStartDate string `json:"ice_start_date"`
+		IceEndDate   string `json:"ice_end_date"`
+	}
+	var customerEvents []CustomerEventInput
 
 	// -------------------------
 	// 1) Parse request (multipart or JSON)
@@ -366,31 +384,29 @@ func IssueInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 		req.Pos = utils.NewNullString(c.FormValue("ip_pos"))
 		req.CreatedBy = utils.NewNullString(c.FormValue("ip_created_by"))
 
-		req.IceKKen1Date = parseDatePtr(c.FormValue("ice_k_ken_1_date"))
-		req.IceKKen2Date = parseDatePtr(c.FormValue("ice_k_ken_2_date"))
-		req.Ice1PPDate = parseDatePtr(c.FormValue("ice_1pp_date"))
-		req.Ice2PPDate = parseDatePtr(c.FormValue("ice_2pp_date"))
-		req.IcePPDate = parseDatePtr(c.FormValue("ice_pp_date"))
-		req.IceSopDate = parseDatePtr(c.FormValue("ice_sop_date"))
-
-		// parse new end-date fields (if provided)
-		req.IceKKen1EndDate = parseDatePtr(c.FormValue("ice_k_ken_1_end_date"))
-		req.IceKKen2EndDate = parseDatePtr(c.FormValue("ice_k_ken_2_end_date"))
-		req.Ice1PPEndDate = parseDatePtr(c.FormValue("ice_1pp_end_date"))
-		req.Ice2PPEndDate = parseDatePtr(c.FormValue("ice_2pp_end_date"))
-		req.IcePPEndDate = parseDatePtr(c.FormValue("ice_pp_end_date"))
-		req.IceSopEndDate = parseDatePtr(c.FormValue("ice_sop_end_date"))
-
 		// optional POS file metadata
 		req.IpfFileName = utils.NewNullString(c.FormValue("ipf_file_name"))
+
+		// parse customer_events from a JSON-encoded form field
+		if evStr := strings.TrimSpace(c.FormValue("customer_events")); evStr != "" {
+			_ = json.Unmarshal([]byte(evStr), &customerEvents)
+		}
 
 		// IMPORTANT: ignore ipf_file_path from client
 		// TH: ห้ามเชื่อ path จากฝั่ง client เพราะ backend เปิดจากเครื่อง client ไม่ได้
 		req.IpfFilePath = utils.NewNullString("")
 	} else {
 		// fallback to JSON body
-		if err := c.BodyParser(&req); err != nil {
+		raw := c.Body()
+		if err := json.Unmarshal(raw, &req); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "invalid request", "detail": err.Error()})
+		}
+		// also extract customer_events from same JSON body
+		var bodyMap map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &bodyMap); err == nil {
+			if evRaw, ok := bodyMap["customer_events"]; ok {
+				_ = json.Unmarshal(evRaw, &customerEvents)
+			}
 		}
 	}
 
@@ -487,41 +503,41 @@ func IssueInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 
 	// -------------------------
-	// 5) Insert info_customer_event
+	// 5) Insert into info_customer_events
 	// -------------------------
-	eventParams := map[string]any{
-		"ip_id":                ipID,
-		"ice_status":           "active",
-		"ice_created_at":       now,
-		"ice_created_by":       req.CreatedBy,
-		"ice_updated_at":       now,
-		"ice_updated_by":       req.CreatedBy,
-		"ice_k_ken_1_date":     req.IceKKen1Date,
-		"ice_k_ken_2_date":     req.IceKKen2Date,
-		"ice_1pp_date":         req.Ice1PPDate,
-		"ice_2pp_date":         req.Ice2PPDate,
-		"ice_pp_date":          req.IcePPDate,
-		"ice_sop_date":         req.IceSopDate,
-		"ice_k_ken_1_end_date": req.IceKKen1EndDate,
-		"ice_k_ken_2_end_date": req.IceKKen2EndDate,
-		"ice_1pp_end_date":     req.Ice1PPEndDate,
-		"ice_2pp_end_date":     req.Ice2PPEndDate,
-		"ice_pp_end_date":      req.IcePPEndDate,
-		"ice_sop_end_date":     req.IceSopEndDate,
+	parseEventDate := func(s string) interface{} {
+		s = strings.TrimSpace(s)
+		if s == "" || s == "null" {
+			return nil
+		}
+		t, err := time.ParseInLocation("2006-01-02", s, time.Local)
+		if err != nil {
+			return nil
+		}
+		return t
 	}
-
-	_, err = tx.NamedExec(`
-		INSERT INTO info_customer_event
-			(ip_id, ice_status, ice_created_at, ice_created_by, ice_updated_at, ice_updated_by,
-			 ice_k_ken_1_date, ice_k_ken_2_date, ice_1pp_date, ice_2pp_date, ice_pp_date, ice_sop_date,
-			 ice_k_ken_1_end_date, ice_k_ken_2_end_date, ice_1pp_end_date, ice_2pp_end_date, ice_pp_end_date, ice_sop_end_date)
-		VALUES
-			(:ip_id, :ice_status, :ice_created_at, :ice_created_by, :ice_created_at, :ice_created_by,
-			 :ice_k_ken_1_date, :ice_k_ken_2_date, :ice_1pp_date, :ice_2pp_date, :ice_pp_date, :ice_sop_date,
-			 :ice_k_ken_1_end_date, :ice_k_ken_2_end_date, :ice_1pp_end_date, :ice_2pp_end_date, :ice_pp_end_date, :ice_sop_end_date)
-	`, eventParams)
-	if err != nil {
-		return c.Status(500).JSON(5.5)
+	for _, ev := range customerEvents {
+		var mceVal interface{}
+		if ev.MceID != 0 {
+			mceVal = ev.MceID
+		}
+		createdBy := ""
+		if req.CreatedBy.Valid {
+			createdBy = req.CreatedBy.String
+		}
+		_, err := tx.Exec(`
+			INSERT INTO info_customer_events
+				(mce_id, ice_start_date, ice_end_date, ice_status_event,
+				 ice_created_at, ice_created_by, ice_updated_at, ice_updated_by, ip_id)
+			VALUES (?, ?, ?, 'inprogress', ?, ?, ?, ?, ?)`,
+			mceVal,
+			parseEventDate(ev.IceStartDate),
+			parseEventDate(ev.IceEndDate),
+			now, createdBy, now, createdBy, ipID,
+		)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "insert info_customer_events failed", "detail": err.Error()})
+		}
 	}
 
 	uploadBase := os.Getenv("UPLOAD_BASE")
@@ -793,8 +809,26 @@ func SelectModel(c *fiber.Ctx, db *sqlx.DB) error {
 		ID           int64            `db:"mmm_id" json:"mmm_id"`
 		Model        string           `db:"mmm_model" json:"mmm_model"`
 		CustomerName utils.NullString `db:"mmm_customer_name" json:"mmm_customer_name"`
+		MceID        utils.NullString `db:"mce_id" json:"mce_id"`
 	}
-	if err := db.Select(&models, `SELECT mmm_id, mmm_model, mmm_customer_name FROM mst_model_master WHERE mmm_status = 'active' ORDER BY mmm_model ASC`); err != nil {
+	if err := db.Select(&models, `SELECT 
+									mmm.mmm_id, 
+									mmm.mmm_model, 
+									mmm.mmm_customer_name,
+									GROUP_CONCAT(DISTINCT mce.mce_id ORDER BY mce.mce_id SEPARATOR ',') AS mce_id,
+									GROUP_CONCAT(DISTINCT mce.mce_name ORDER BY mce.mce_name SEPARATOR ', ') AS mce_name
+									FROM mst_model_master mmm
+									LEFT JOIN mst_customer_event mce 
+									ON mmm.mmm_id = mce.mmm_id 
+									AND mce.mce_status = 'active'
+									WHERE mmm.mmm_status = 'active'
+									GROUP BY 
+									mmm.mmm_id, 
+									mmm.mmm_model, 
+									mmm.mmm_customer_name
+									ORDER BY mmm.mmm_model,mce.mce_id ASC;
+								
+								`); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
 	return c.Status(200).JSON(models)
@@ -1444,6 +1478,685 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 
 	if err := tx.Commit(); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "commit failed", "detail": err.Error()})
+	}
+
+	return c.Status(201).JSON(1)
+}
+
+func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
+
+	// Optional query param: only process rows whose mpp_id matches this value
+	var phaseNumber int64
+	if pn := strings.TrimSpace(c.Query("phase_number")); pn != "" {
+		var err error
+		phaseNumber, err = strconv.ParseInt(pn, 10, 64)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid phase_number", "detail": err.Error()})
+		}
+	}
+
+	seenSuIDs := map[int64]struct{}{}
+
+	var body struct {
+		IpID         int64         `json:"ip_id"`
+		MaName       []string      `json:"ma_name"`
+		MppID        []int64       `json:"mpp_id"`
+		SuID         []string      `json:"su_id"`          // per row: "2,6"
+		IpidLineCode []string      `json:"ipid_line_code"` // per row: "4,6"
+		StartDate    StringOrArray `json:"ipid_start_date"`
+		EndDate      StringOrArray `json:"ipid_end_date"`
+		CreatedBy    string        `json:"created_by"`
+	}
+
+	raw := c.Body()
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "empty body"})
+	}
+
+	// Try BodyParser first (handles JSON and form/multipart).
+	if err := c.BodyParser(&body); err != nil {
+		// If BodyParser fails, attempt json.Unmarshal into struct.
+		if err2 := json.Unmarshal(raw, &body); err2 != nil {
+			// As a last-resort, try to extract at least ip_id from the raw JSON
+			var m map[string]any
+			if err3 := json.Unmarshal(raw, &m); err3 == nil {
+				if v, ok := m["ip_id"]; ok {
+					switch t := v.(type) {
+					case float64:
+						body.IpID = int64(t)
+					case string:
+						if id, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+							body.IpID = id
+						}
+					}
+
+					var _m map[string]any
+					if err := json.Unmarshal(raw, &_m); err == nil {
+						m := _m
+						// coerce ma_name if present
+						if v, ok := m["ma_name"]; ok {
+							switch t := v.(type) {
+							case []any:
+								out := make([]string, 0, len(t))
+								for _, e := range t {
+									if s, ok2 := e.(string); ok2 {
+										out = append(out, s)
+									}
+								}
+								if len(out) > 0 {
+									body.MaName = out
+								}
+							case string:
+								if len(body.MaName) == 0 {
+									body.MaName = []string{t}
+								}
+							}
+						}
+
+						// coerce mpp_id if present
+						if v, ok := m["mpp_id"]; ok {
+							switch t := v.(type) {
+							case []any:
+								out := make([]int64, 0, len(t))
+								for _, e := range t {
+									switch x := e.(type) {
+									case float64:
+										out = append(out, int64(x))
+									case string:
+										if id, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64); err == nil {
+											out = append(out, id)
+										}
+									}
+								}
+								if len(out) > 0 {
+									body.MppID = out
+								}
+							case string:
+								if id, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+									body.MppID = []int64{id}
+								}
+							}
+						}
+
+						// coerce su_id
+						if v, ok := m["su_id"]; ok {
+							switch t := v.(type) {
+							case []any:
+								out := make([]string, 0, len(t))
+								for _, e := range t {
+									switch x := e.(type) {
+									case float64:
+										out = append(out, strconv.FormatInt(int64(x), 10))
+									case string:
+										out = append(out, x)
+									}
+								}
+								if len(out) > 0 {
+									body.SuID = out
+								}
+							case string:
+								body.SuID = []string{t}
+							}
+						}
+
+						// coerce ipid_line_code
+						if v, ok := m["ipid_line_code"]; ok {
+							switch t := v.(type) {
+							case []any:
+								out := make([]string, 0, len(t))
+								for _, e := range t {
+									if s, ok2 := e.(string); ok2 {
+										out = append(out, s)
+									}
+								}
+								if len(out) > 0 {
+									body.IpidLineCode = out
+								}
+							case string:
+								body.IpidLineCode = []string{t}
+							}
+						}
+					}
+				}
+
+				if v, ok := m["created_by"]; ok {
+					if s, ok2 := v.(string); ok2 {
+						body.CreatedBy = s
+					}
+				}
+				if v, ok := m["ma_name"]; ok {
+					// try to coerce to []string if possible
+					if arr, ok2 := v.([]any); ok2 {
+						out := make([]string, 0, len(arr))
+						for _, e := range arr {
+							if s, ok3 := e.(string); ok3 {
+								out = append(out, s)
+							}
+						}
+						body.MaName = out
+					}
+				}
+
+				// coerce su_id (allow arrays of numbers/strings or single CSV string)
+				if v, ok := m["su_id"]; ok {
+					switch t := v.(type) {
+					case []any:
+						out := make([]string, 0, len(t))
+						for _, e := range t {
+							switch x := e.(type) {
+							case nil:
+								out = append(out, "")
+							case float64:
+								out = append(out, strconv.FormatInt(int64(x), 10))
+							case string:
+								out = append(out, x)
+							default:
+								out = append(out, fmt.Sprintf("%v", x))
+							}
+						}
+						body.SuID = out
+					case string:
+						body.SuID = []string{t}
+					}
+				}
+
+				// coerce ipid_line_code similar to sd_id
+				if v, ok := m["ipid_line_code"]; ok {
+					switch t := v.(type) {
+					case []any:
+						out := make([]string, 0, len(t))
+						for _, e := range t {
+							if e == nil {
+								out = append(out, "")
+								continue
+							}
+							if s, ok2 := e.(string); ok2 {
+								out = append(out, s)
+							} else {
+								out = append(out, fmt.Sprintf("%v", e))
+							}
+						}
+						body.IpidLineCode = out
+					case string:
+						body.IpidLineCode = []string{t}
+					}
+				}
+			}
+		}
+	}
+
+	// ------------------------
+	// 2) Validate
+	// ------------------------
+	n := len(body.MaName)
+	if body.IpID == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "ip_id required"})
+	}
+	if n == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "ma_name required"})
+	}
+	body.CreatedBy = strings.TrimSpace(body.CreatedBy)
+	if body.CreatedBy == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "created_by required"})
+	}
+
+	mustEqual := func(arrLen int) bool { return arrLen == 0 || arrLen == n }
+	// allow Start/End to be 0,1,n
+	startOK := len(body.StartDate) == 0 || len(body.StartDate) == 1 || len(body.StartDate) == n
+	endOK := len(body.EndDate) == 0 || len(body.EndDate) == 1 || len(body.EndDate) == n
+	// allow Su/LineCode to be 0,1,n (single value reused for all rows)
+	suOK := len(body.SuID) == 0 || len(body.SuID) == 1 || len(body.SuID) == n
+	lineOK := len(body.IpidLineCode) == 0 || len(body.IpidLineCode) == 1 || len(body.IpidLineCode) == n
+
+	if !mustEqual(len(body.MppID)) || !suOK || !lineOK || !startOK || !endOK {
+		return c.Status(400).JSON(fiber.Map{
+			"error": "all arrays must be equal length or omitted (dates can be 1 or n)",
+		})
+	}
+
+	// ------------------------
+	// Helpers
+	// ------------------------
+	parseCSVInts := func(s string) []int64 {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]int64, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if v, err := strconv.ParseInt(p, 10, 64); err == nil {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+
+	parseCSVStrings := func(s string) []string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+
+	// Convert StringOrArray date -> any (time.Time) or nil
+	getDateAny := func(arr []string, row int) any {
+		if len(arr) == 0 {
+			return nil
+		}
+		idx := row
+		if len(arr) == 1 {
+			idx = 0
+		}
+		if idx < 0 || idx >= len(arr) {
+			return nil
+		}
+		val := strings.TrimSpace(arr[idx])
+		if val == "" || val == "null" {
+			return nil
+		}
+		t, err := time.ParseInLocation("2006-01-02", val, time.Local)
+		if err != nil {
+			return nil
+		}
+		return t
+	}
+
+	// ------------------------
+	// 3) Transaction
+	// ------------------------
+	now := time.Now()
+	tx, err := db.Beginx()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "transaction begin failed", "detail": err.Error()})
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// cleanup: delete any existing info_apqp_item for this ip_id whose name is NOT in incoming list
+	incoming := map[string]struct{}{}
+	for _, nm := range body.MaName {
+		incoming[strings.TrimSpace(nm)] = struct{}{}
+	}
+	var existingItems []struct {
+		IaiID   int64  `db:"iai_id"`
+		IaiName string `db:"iai_name"`
+	}
+	if err := tx.Select(&existingItems, `SELECT iai_id, iai_name FROM info_apqp_item WHERE ip_id = ?`, body.IpID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "query existing apqp items failed", "detail": err.Error()})
+	}
+	for _, it := range existingItems {
+		nm := strings.TrimSpace(it.IaiName)
+		if _, ok := incoming[nm]; !ok {
+			// delete details (only type 'apqp') then delete the apqp item
+			if _, err := tx.Exec(`DELETE FROM info_project_item_detail WHERE ref_id = ? AND ipid_type = 'apqp'`, it.IaiID); err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "delete apqp details failed", "detail": err.Error()})
+			}
+			if _, err := tx.Exec(`DELETE FROM info_apqp_item WHERE iai_id = ?`, it.IaiID); err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "delete apqp item failed", "detail": err.Error()})
+			}
+		}
+	}
+
+	// info_approval insertion intentionally removed
+
+	// helper: upsert a single info_project_item_detail row (avoid duplicates)
+	upsertDetail := func(refID interface{}, sd interface{}, su interface{}, line interface{}, start interface{}, end interface{}) (int64, error) {
+		var existing struct {
+			IpidID int64        `db:"ipid_id"`
+			Start  sql.NullTime `db:"ipid_start_date"`
+			End    sql.NullTime `db:"ipid_end_date"`
+		}
+		sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'apqp' LIMIT 1`
+		if err := tx.Get(&existing, sel, refID, sd, sd, su, su, line, line); err == nil {
+			needUpdate := false
+			// start
+			if start == nil && existing.Start.Valid {
+				needUpdate = true
+			}
+			if startTime, ok := start.(time.Time); ok {
+				if !existing.Start.Valid || !existing.Start.Time.Equal(startTime) {
+					needUpdate = true
+				}
+			}
+			// end
+			if !needUpdate {
+				if end == nil && existing.End.Valid {
+					needUpdate = true
+				}
+				if endTime, ok := end.(time.Time); ok {
+					if !existing.End.Valid || !existing.End.Time.Equal(endTime) {
+						needUpdate = true
+					}
+				}
+			}
+			ipidID := existing.IpidID
+			if needUpdate {
+				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
+					return 0, err
+				}
+			}
+			return ipidID, nil
+		} else {
+			if err != sql.ErrNoRows {
+				return 0, err
+			}
+
+			var candidate struct {
+				IpidID int64        `db:"ipid_id"`
+				Start  sql.NullTime `db:"ipid_start_date"`
+				End    sql.NullTime `db:"ipid_end_date"`
+			}
+			sel2 := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail
+				WHERE ref_id = ? AND ipid_type = 'apqp'
+				AND ((? IS NULL) OR sd_id = ? OR sd_id IS NULL)
+				AND ((? IS NULL) OR su_id = ? OR su_id IS NULL)
+				AND ((? IS NULL) OR ipid_line_code = ? OR ipid_line_code IS NULL)
+				LIMIT 1`
+			if err2 := tx.Get(&candidate, sel2, refID, sd, sd, su, su, line, line); err2 == nil {
+				// Build UPDATE that sets only columns for which incoming value is non-nil
+				parts := []string{"ipid_start_date = ?", "ipid_end_date = ?", "ipid_updated_at = ?", "ipid_updated_by = ?"}
+				args := []interface{}{start, end, now, body.CreatedBy}
+				if sd != nil {
+					parts = append([]string{"sd_id = ?"}, parts...)
+					args = append([]interface{}{sd}, args...)
+				}
+				if su != nil {
+					parts = append([]string{"su_id = ?"}, parts...)
+					args = append([]interface{}{su}, args...)
+				}
+				if line != nil {
+					parts = append([]string{"ipid_line_code = ?"}, parts...)
+					args = append([]interface{}{line}, args...)
+				}
+				// append WHERE id
+				args = append(args, candidate.IpidID)
+				upd := "UPDATE info_project_item_detail SET " + strings.Join(parts, ", ") + " WHERE ipid_id = ?"
+				if _, err := tx.Exec(upd, args...); err != nil {
+					return 0, err
+				}
+				return candidate.IpidID, nil
+			}
+
+			// no candidate -> insert new row
+			res, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				refID, sd, su, line, "apqp", start, end, "inprogress", now, body.CreatedBy, now, body.CreatedBy,
+			)
+			if err != nil {
+				return 0, err
+			}
+			id, _ := res.LastInsertId()
+			return id, nil
+		}
+	}
+
+	for i := 0; i < n; i++ {
+
+		// ---- filter by phase_number if provided ----
+		if phaseNumber != 0 {
+			var rowMppID int64
+			if len(body.MppID) == n {
+				rowMppID = body.MppID[i]
+			}
+			if rowMppID != phaseNumber {
+				continue
+			}
+		}
+
+		// ---- insert or reuse info_apqp_item ----
+		var mppVal any = nil
+		if len(body.MppID) == n && body.MppID[i] != 0 {
+			mppVal = body.MppID[i]
+		}
+		var iaiID int64
+
+		if mppVal != nil {
+			if err := tx.Get(&iaiID, `SELECT iai_id FROM info_apqp_item WHERE ip_id = ? AND iai_name = ? AND mpp_id = ? LIMIT 1`,
+				body.IpID, body.MaName[i], mppVal,
+			); err != nil {
+				if err == sql.ErrNoRows {
+					res, err := tx.NamedExec(`
+						INSERT INTO info_apqp_item
+						(ipmp_id, mpp_id, iai_name, iai_created_at, iai_created_by, ip_id)
+						VALUES
+						(:ipmp_id, :mpp_id, :iai_name, :iai_created_at, :iai_created_by, :ip_id)
+					`, map[string]any{
+						"ipmp_id":        nil,
+						"mpp_id":         mppVal,
+						"iai_name":       body.MaName[i],
+						"iai_created_at": now,
+						"iai_created_by": body.CreatedBy,
+						"ip_id":          body.IpID,
+					})
+					if err != nil {
+						return c.Status(500).JSON(fiber.Map{"error": "insert info_apqp_item failed", "detail": err.Error()})
+					}
+					iaiID, _ = res.LastInsertId()
+				} else {
+					return c.Status(500).JSON(fiber.Map{"error": "query info_apqp_item failed", "detail": err.Error()})
+				}
+			}
+		} else {
+			if err := tx.Get(&iaiID, `SELECT iai_id FROM info_apqp_item WHERE ip_id = ? AND iai_name = ? LIMIT 1`,
+				body.IpID, body.MaName[i],
+			); err != nil {
+				if err == sql.ErrNoRows {
+					res, err := tx.NamedExec(`
+						INSERT INTO info_apqp_item
+						(ipmp_id, mpp_id, iai_name, iai_created_at, iai_created_by, ip_id)
+						VALUES
+						(:ipmp_id, :mpp_id, :iai_name, :iai_created_at, :iai_created_by, :ip_id)
+					`, map[string]any{
+						"ipmp_id":        nil,
+						"mpp_id":         mppVal,
+						"iai_name":       body.MaName[i],
+						"iai_created_at": now,
+						"iai_created_by": body.CreatedBy,
+						"ip_id":          body.IpID,
+					})
+					if err != nil {
+						return c.Status(500).JSON(fiber.Map{"error": "insert info_apqp_item failed", "detail": err.Error()})
+					}
+					iaiID, _ = res.LastInsertId()
+				} else {
+					return c.Status(500).JSON(fiber.Map{"error": "query info_apqp_item failed", "detail": err.Error()})
+				}
+			}
+		}
+
+		// ---- su list per row (split by comma) ----
+		// Determine whether su was provided per-row (len==n) or as a single/global cell (len==1)
+		suPerRow := len(body.SuID) == n
+		globalSu := []int64{}
+		if len(body.SuID) == 1 {
+			globalSu = parseCSVInts(body.SuID[0])
+		}
+		suList := []int64{}
+		if suPerRow {
+			suList = parseCSVInts(body.SuID[i])
+		}
+
+		// ---- line_code list per row (split by comma) ----
+		lineCodeList := []string{}
+		if len(body.IpidLineCode) == n {
+			lineCodeList = parseCSVStrings(body.IpidLineCode[i]) // "4,6" -> ["4","6"]
+		} else if len(body.IpidLineCode) == 1 {
+			lineCodeList = parseCSVStrings(body.IpidLineCode[0])
+		}
+
+		startDate := getDateAny([]string(body.StartDate), i)
+		endDate := getDateAny([]string(body.EndDate), i)
+
+		// Get line code value
+		var lineVal any = nil
+		if len(lineCodeList) == 1 {
+			v := strings.TrimSpace(lineCodeList[0])
+			if v != "" && !strings.EqualFold(v, "null") {
+				lineVal = v
+			}
+		}
+
+		// Helper: get sd_id from su_id by querying sys_user
+		getSdIdFromSuId := func(suID int64) (interface{}, error) {
+			var sdID sql.NullInt64
+			if err := tx.Get(&sdID, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, suID); err != nil && err != sql.ErrNoRows {
+				return nil, err
+			}
+			if sdID.Valid {
+				return sdID.Int64, nil
+			}
+			return nil, nil
+		}
+
+		// Process su_id list and derive sd_id from each
+		if suPerRow && len(suList) > 0 {
+			// su provided per-row: insert one row per su with sd_id derived from su_id
+			for _, su := range suList {
+				sdID, err := getSdIdFromSuId(su)
+				if err != nil {
+					return c.Status(500).JSON(fiber.Map{"error": "failed to get sd_id from su_id", "detail": err.Error()})
+				}
+				_, err = upsertDetail(iaiID, sdID, su, lineVal, startDate, endDate)
+				if err != nil {
+					return c.Status(500).JSON(fiber.Map{"error": "insert info_project_item_detail failed", "detail": err.Error()})
+				}
+				seenSuIDs[su] = struct{}{}
+			}
+		} else if len(globalSu) > 0 {
+			// su was provided as a single/global cell: insert one row per su with sd_id derived from su_id
+			for _, su := range globalSu {
+				sdID, err := getSdIdFromSuId(su)
+				if err != nil {
+					return c.Status(500).JSON(fiber.Map{"error": "failed to get sd_id from su_id", "detail": err.Error()})
+				}
+				_, err = upsertDetail(iaiID, sdID, su, lineVal, startDate, endDate)
+				if err != nil {
+					return c.Status(500).JSON(fiber.Map{"error": "insert info_project_item_detail failed", "detail": err.Error()})
+				}
+				seenSuIDs[su] = struct{}{}
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "commit failed", "detail": err.Error()})
+	}
+
+	// ---- Send notification email to all processed su_ids ----
+	if len(seenSuIDs) > 0 {
+		go func() {
+			// Collect emails for all processed users
+			type UserInfo struct {
+				Email     sql.NullString `db:"su_email"`
+				Firstname sql.NullString `db:"su_firstname"`
+				Lastname  sql.NullString `db:"su_lastname"`
+			}
+
+			// Build IN-clause
+			suSlice := make([]int64, 0, len(seenSuIDs))
+			for id := range seenSuIDs {
+				suSlice = append(suSlice, id)
+			}
+			query, args, err := sqlx.In(
+				`SELECT su_email, su_firstname, su_lastname FROM sys_user WHERE su_id IN (?) AND su_status = 'active' AND su_email IS NOT NULL AND su_email <> ''`,
+				suSlice,
+			)
+			if err != nil {
+				log.Printf("InsertAPQPByPhase mail: build query error: %v", err)
+				return
+			}
+			var userInfos []UserInfo
+			if err := db.Select(&userInfos, db.Rebind(query), args...); err != nil {
+				log.Printf("InsertAPQPByPhase mail: query users error: %v", err)
+				return
+			}
+			if len(userInfos) == 0 {
+				return
+			}
+
+			// Fetch project info for email body
+			var proj struct {
+				IpCode     sql.NullString `db:"ip_code"`
+				IpPartNo   sql.NullString `db:"ip_part_no"`
+				IpPartName sql.NullString `db:"ip_part_name"`
+				IpModel    sql.NullString `db:"ip_model"`
+			}
+			_ = db.Get(&proj, `SELECT ip_code, ip_part_no, ip_part_name, ip_model FROM info_project WHERE ip_id = ? LIMIT 1`, body.IpID)
+
+			getStr := func(ns sql.NullString) string {
+				if ns.Valid {
+					return ns.String
+				}
+				return "-"
+			}
+
+			// Build email recipients list
+			tos := make([]string, 0, len(userInfos))
+			for _, u := range userInfos {
+				if u.Email.Valid && strings.TrimSpace(u.Email.String) != "" {
+					tos = append(tos, strings.TrimSpace(u.Email.String))
+				}
+			}
+			if len(tos) == 0 {
+				return
+			}
+
+			// Build HTML email body
+			var sb strings.Builder
+			sb.WriteString("<html><body style='font-family:Arial,sans-serif; background:#f6f8fb; padding:20px;'>")
+			sb.WriteString("<div style='max-width:680px; margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:24px;'>")
+			sb.WriteString("<div style='font-size:20px; font-weight:bold; color:#1f2d3d;'>TBKK Project Control – Task Assignment</div>")
+			sb.WriteString("<div style='font-size:13px; color:#6b7280; margin-bottom:16px;'>You have been assigned to an APQP task.</div>")
+			sb.WriteString("<hr style='border:none; border-top:1px dashed #d1d5db; margin:12px 0;'>")
+
+			// Project info table
+			sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse;'>")
+			sb.WriteString("<tr>")
+			sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+			sb.WriteString("<div style='font-size:12px; color:#374151;'>PROJECT CODE</div>")
+			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>#" + html.EscapeString(getStr(proj.IpCode)) + "</div>")
+			sb.WriteString("</td>")
+			sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+			sb.WriteString("<div style='font-size:12px; color:#374151;'>MODEL</div>")
+			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpModel)) + "</div>")
+			sb.WriteString("</td>")
+			sb.WriteString("</tr><tr>")
+			sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+			sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NO</div>")
+			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpPartNo)) + "</div>")
+			sb.WriteString("</td>")
+			sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+			sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NAME</div>")
+			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpPartName)) + "</div>")
+			sb.WriteString("</td>")
+			sb.WriteString("</tr></table>")
+
+			sb.WriteString("<div style='margin-top:20px;'>")
+			sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
+			sb.WriteString("</div>")
+
+			sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
+			sb.WriteString("<p>Best Regards,<br><strong>System Service Department</strong></p>")
+			sb.WriteString("</div>")
+			sb.WriteString("</div></body></html>")
+
+			subject := "TBKK Project Control Notification : Task Assignment"
+			if mailErr := SendMail(tos, subject, sb.String(), "text/html; charset=utf-8"); mailErr != nil {
+				log.Printf("InsertAPQPByPhase mail: send error: %v", mailErr)
+			}
+		}()
 	}
 
 	return c.Status(201).JSON(1)

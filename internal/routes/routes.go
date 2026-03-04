@@ -134,6 +134,7 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Post("/apiTrackingSystem/manageProject/InsertProjectStep3", func(c *fiber.Ctx) error { return handlers.InsertProjectStep3(c, db) })
 	app.Post("/apiTrackingSystem/manageProject/UpdateStatusProjectItemDetail", func(c *fiber.Ctx) error { return handlers.UpdateStatusProjectItemDetail(c, db) })
 	app.Post("/apiTrackingSystem/manageProject/UpdateStatusCompleteProject", func(c *fiber.Ctx) error { return handlers.UpdateStatusCompleteProject(c, db) })
+	app.Post("/apiTrackingSystem/manageProject/InsertAPQPByPhase", func(c *fiber.Ctx) error { return handlers.InsertAPQPByPhase(c, db) })
 
 	app.Get("/apiTrackingSystem/menu/GetUserMenu", func(c *fiber.Ctx) error { return handlers.GetUserMenu(c, db) })
 
@@ -164,7 +165,7 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Static("/uploads", `C:\inetpub\wwwroot\apiTrackingSystemUat\uploads`)
 }
 
-// http://192.168.161.219:9004/apiTrackingSystem/manageEvent/ListCustomerEvents
+// http://192.168.161.219:9004/apiTrackingSystem/manageProject/InsertAPQPByPhase
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/InsertCustomerEvent
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEvent
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEventStatus

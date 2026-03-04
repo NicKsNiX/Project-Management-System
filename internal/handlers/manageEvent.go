@@ -12,24 +12,28 @@ import (
 type CustomerEvent struct {
 	ID                 int64            `db:"mce_id" json:"mce_id"`
 	MmmID              utils.NullInt64  `db:"mmm_id" json:"mmm_id"`
+	MMMName            utils.NullString `db:"mmm_model" json:"mmm_model"`
+	MMCustomerName     utils.NullString `db:"mmm_customer_name" json:"mmm_customer_name"`
 	Name               utils.NullString `db:"mce_name" json:"mce_name"`
 	Status             string           `db:"mce_status" json:"mce_status"`
 	CreatedAt          *time.Time       `db:"mce_created_at" json:"mce_created_at"`
 	CreatedBy          utils.NullString `db:"mce_created_by" json:"mce_created_by"`
 	UpdatedAt          *time.Time       `db:"mce_updated_at" json:"mce_updated_at"`
 	UpdatedBy          utils.NullString `db:"mce_updated_by" json:"mce_updated_by"`
-	UpdatedByFirstName utils.NullString `db:"su_first_name" json:"updated_by_first_name"`
-	UpdatedByLastName  utils.NullString `db:"su_last_name" json:"updated_by_last_name"`
+	UpdatedByFirstName utils.NullString `db:"su_firstname" json:"updated_by_first_name"`
+	UpdatedByLastName  utils.NullString `db:"su_lastname" json:"updated_by_last_name"`
 }
 
 func ListCustomerEvents(c *fiber.Ctx, db *sqlx.DB) error {
 	status := c.Query("mce_status")
-	query := `SELECT mce_id, mmm_id, mce_name, mce_status,
+	query := `SELECT mce_id, mce.mmm_id, mce_name, mce_status,
+					 mmm.mmm_model,mmm.mmm_customer_name,
 	                 mce_created_at, mce_created_by,
 	                 mce_updated_at, mce_updated_by,
-	                 su.su_first_name, su.su_last_name
-	          FROM mst_customer_event
-	          LEFT JOIN sys_user su ON su.su_username = mst_customer_event.mce_updated_by
+	                 su.su_firstname, su.su_lastname
+	          FROM mst_customer_event mce
+			  LEFT JOIN mst_model_master mmm ON mce.mmm_id = mmm.mmm_id
+	          LEFT JOIN sys_user su ON su.su_emp_code = mce.mce_updated_by
 	          WHERE 1=1`
 	args := []interface{}{}
 	if status != "" {

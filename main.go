@@ -36,7 +36,7 @@ func main() {
 
 	// CORS middleware - allow browser origin to call this API
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://192.168.161.205:4001",
+		AllowOrigins:     "http://192.168.161.205:4005",
 		AllowMethods:     "GET,POST,HEAD,PUT,DELETE,OPTIONS",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
 		AllowCredentials: true,

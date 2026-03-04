@@ -16,6 +16,7 @@ type SysModelMaster struct {
 	Aaname             utils.NullString `db:"aname" json:"aname"`
 	CustomerName       utils.NullString `db:"mmm_customer_name" json:"mmm_customer_name"`
 	Status             string           `db:"mmm_status" json:"mmm_status"`
+	MecName            utils.NullString `db:"mce_name" json:"mce_name"`
 	CreatedAt          *time.Time       `db:"mmm_created_at" json:"mmm_created_at"`
 	CreatedBy          utils.NullString `db:"mmm_created_by" json:"mmm_created_by"`
 	UpdatedAt          *time.Time       `db:"mmm_updated_at" json:"mmm_updated_at"`
@@ -26,20 +27,32 @@ type SysModelMaster struct {
 
 func ListModelMaster(c *fiber.Ctx, db *sqlx.DB) error {
 	status := c.Query("mmm_status")
-	query := `SELECT mmm.mmm_id AS mmm_id,
-				 mmm_model AS mmm_model,
-				 mmm_customer_name AS mmm_customer_name,
-				 GROUP_CONCAT(mpi.mpi_name SEPARATOR ', ') AS aname,
-				 mpi.mpi_name AS mpi_name,
-				 mmm_status AS mmm_status,
-				 mmm_updated_at AS mmm_updated_at,
-				 mmm_updated_by AS mmm_updated_by,
-				 su.su_firstname AS mmm_updated_by_firstname,
-				 su.su_lastname AS mmm_updated_by_lastname
-			FROM mst_model_master mmm
-			LEFT JOIN sys_user su ON mmm_updated_by = su_emp_code
-			LEFT JOIN mst_ppap_detail mpd ON mmm.mmm_id = mpd.mmm_id
-			LEFT JOIN mst_ppap_item mpi ON mpd.mpi_id = mpi.mpi_id
+	query := `SELECT
+				mmm.mmm_id AS mmm_id,
+				mmm.mmm_model AS mmm_model,
+				mmm.mmm_customer_name AS mmm_customer_name,
+				GROUP_CONCAT(DISTINCT mpi.mpi_name ORDER BY mpi.mpi_name SEPARATOR ', ') AS aname,
+				mceAgg.mce_names AS mce_name,
+				mmm.mmm_status AS mmm_status,
+				mmm.mmm_updated_at AS mmm_updated_at,
+				mmm.mmm_updated_by AS mmm_updated_by,
+				su.su_firstname AS mmm_updated_by_firstname,
+				su.su_lastname AS mmm_updated_by_lastname
+				FROM mst_model_master mmm
+				LEFT JOIN sys_user su
+				ON mmm.mmm_updated_by = su.su_emp_code
+				LEFT JOIN mst_ppap_detail mpd
+				ON mmm.mmm_id = mpd.mmm_id
+				LEFT JOIN mst_ppap_item mpi
+				ON mpd.mpi_id = mpi.mpi_id
+				LEFT JOIN (
+				SELECT
+					mmm_id,
+					GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_name SEPARATOR ', ') AS mce_names
+				FROM mst_customer_event
+				GROUP BY mmm_id
+				) mceAgg
+				ON mmm.mmm_id = mceAgg.mmm_id
 			WHERE 1=1
 			`
 	args := []interface{}{}
@@ -47,7 +60,7 @@ func ListModelMaster(c *fiber.Ctx, db *sqlx.DB) error {
 		query += " AND mmm_status = ?"
 		args = append(args, status)
 	}
-	query += " AND mpd.mpd_status = 'active' GROUP BY mmm.mmm_model,mmm.mmm_customer_name ORDER BY mmm.mmm_id ASC"
+	query += " AND mpd.mpd_status = 'active' GROUP BY mmm.mmm_id,mmm.mmm_model,mmm.mmm_customer_name,mceAgg.mce_names ORDER BY mmm.mmm_id ASC"
 
 	var list []SysModelMaster
 	if err := db.Select(&list, query, args...); err != nil {

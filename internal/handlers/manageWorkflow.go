@@ -184,9 +184,9 @@ func UpdateWorkflowStatus(c *fiber.Ctx, db *sqlx.DB) error {
 
 func SelectDepartmentMW(c *fiber.Ctx, db *sqlx.DB) error {
 	var departments []struct {
-		ID   int64  `db:"sd_id" json:"sd_id"`
-		Name string `db:"sd_name" json:"sd_name"`
-		Dept string `db:"sd_dept_aname" json:"sd_dept_aname"`
+		ID   int64            `db:"sd_id" json:"sd_id"`
+		Name utils.NullString `db:"sd_name" json:"sd_name"`
+		Dept utils.NullString `db:"sd_dept_aname" json:"sd_dept_aname"`
 	}
 
 	query := `SELECT sd_id AS sd_id, sd_name AS sd_name, sd_dept_aname AS sd_dept_aname FROM sys_department WHERE sd_status = 'active' ORDER BY sd_name ASC`
