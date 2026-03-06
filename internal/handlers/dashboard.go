@@ -13,6 +13,8 @@ import (
 type DashboardProject struct {
 	IpCode         utils.NullString `db:"ip_code" json:"ip_code"`
 	IpModel        utils.NullString `db:"ip_model" json:"ip_model"`
+	IpPartNo       utils.NullString `db:"ip_part_no" json:"ip_part_no"`
+	IpPartName     utils.NullString `db:"ip_part_name" json:"ip_part_name"`
 	IpSopYearMonth utils.NullString `db:"ip_sop_year_month" json:"ip_sop_year_month"`
 	IpCustomerName utils.NullString `db:"ip_customer_name" json:"ip_customer_name"`
 	IpmpName       utils.NullString `db:"ipmp_name" json:"ipmp_name"`
@@ -27,6 +29,7 @@ type MasterPlanSummary struct {
 	IpCode                   utils.NullString `db:"ip_code" json:"ip_code"`
 	IpCustomerName           utils.NullString `db:"ip_customer_name" json:"ip_customer_name"`
 	IpModel                  utils.NullString `db:"ip_model" json:"ip_model"`
+	IpPartNo                 utils.NullString `db:"ip_part_no" json:"ip_part_no"`
 	IpPartName               utils.NullString `db:"ip_part_name" json:"ip_part_name"`
 	IpSopDate                *time.Time       `db:"ip_sop_date" json:"ip_sop_date"`
 	KickOff                  utils.NullString `db:"Kick_Off" json:"kick_off"`
@@ -55,6 +58,8 @@ func ListInprogressProjects(c *fiber.Ctx, db *sqlx.DB) error {
 	query := `SELECT
   ip.ip_code,
   ip.ip_model,
+  ip.ip_part_no,
+  ip.ip_part_name,
   DATE_FORMAT(ip.ip_sop_date, '%Y-%m') AS ip_sop_year_month,
   ip.ip_customer_name,
   ipmp.ipmp_name,
@@ -68,6 +73,8 @@ WHERE ip.ip_status = 'inprogress'
 GROUP BY
   ip.ip_code,
   ip.ip_model,
+  ip.ip_part_no,
+  ip.ip_part_name,
   DATE_FORMAT(ip.ip_sop_date, '%Y-%m'),
   ip.ip_customer_name,
   ipmp.ipmp_name;`

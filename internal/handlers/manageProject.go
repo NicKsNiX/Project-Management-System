@@ -243,6 +243,9 @@ type SysInfoProject struct {
 
 	MceName utils.NullString `json:"mce_name" db:"mce_name"`
 
+	IceStartDate utils.NullString `json:"ice_start_date" db:"ice_start_date"`
+	IceEndDate   utils.NullString `json:"ice_end_date" db:"ice_end_date"`
+
 	IpfFileName       utils.NullString `json:"ipf_file_name" db:"ipf_file_name"`
 	IpfFilePath       utils.NullString `json:"ipf_file_path" db:"ipf_file_path"`
 	IpfUpdatedAt      *DateTime        `json:"ipf_updated_at" db:"ipf_updated_at"`
@@ -289,27 +292,16 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 					info_project.ip_customer_name AS ip_customer_name,
 					su.su_firstname AS ip_updated_by_firstname,
 					su.su_lastname AS ip_updated_by_lastname,
-					ice_k_ken_1_date AS ice_k_ken_1_date,
-					ice_k_ken_2_date AS ice_k_ken_2_date,
-					ice_1pp_date AS ice_1pp_date,
-					ice_2pp_date AS ice_2pp_date,
-					ice_pp_date AS ice_pp_date,
-					ice_sop_date AS ice_sop_date,
 					info_project.mt_id AS mt_id,
 					ipf.ipf_file_name AS ipf_file_name,
 					ipf.ipf_file_path AS ipf_file_path,
 					mt.mt_name AS mt_name,
-					ice.ice_k_ken_1_end_date AS ice_k_ken_1_end_date,
-					ice.ice_k_ken_2_end_date AS ice_k_ken_2_end_date,
-					ice.ice_1pp_end_date AS ice_1pp_end_date,
-					ice.ice_2pp_end_date AS ice_2pp_end_date,
-					ice.ice_pp_end_date AS ice_pp_end_date,
-					ice.ice_sop_end_date AS ice_sop_end_date,
 					mceAgg.mce_names AS mce_name,
+					ices.ice_start_date,
+					ices.ice_end_date,
 					IFNULL(itf.tracking_file_count, 0) AS tracking_file_count
 				FROM info_project 
 				LEFT JOIN sys_user su ON ip_updated_by = su_emp_code
-				LEFT JOIN info_customer_event ice ON info_project.ip_id = ice.ip_id
 				LEFT JOIN info_pos_file ipf ON info_project.ip_id = ipf.ip_id
 				LEFT JOIN mst_template mt ON info_project.mt_id = mt.mt_id
 				LEFT JOIN mst_model_master mmm ON info_project.ip_customer_name = mmm.mmm_customer_name
@@ -323,6 +315,7 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 					WHERE ia.ia_status = 'waiting' AND ia.ia_type = 'PJ' AND pid.ipid_status = 'waiting'
                     GROUP BY ip_id
 				) itf ON info_project.ip_id = itf.ip_id
+				
 				LEFT JOIN (
 					SELECT
 						mmm_id,
@@ -331,6 +324,16 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 					GROUP BY mmm_id
 				) mceAgg
 					ON mmm.mmm_id = mceAgg.mmm_id
+					
+				LEFT JOIN (
+                    SELECT 
+                        ip_id,
+                        GROUP_CONCAT(ice_start_date ORDER BY ice_id SEPARATOR ',') AS ice_start_date,
+                        GROUP_CONCAT(ice_end_date ORDER BY ice_id SEPARATOR ',') AS ice_end_date
+                    FROM info_customer_events
+                    GROUP BY ip_id
+				) ices
+				    ON info_project.ip_id = ices.ip_id
 				WHERE 1=1`
 	args := []interface{}{}
 	if status != "" {
@@ -639,9 +642,23 @@ func IssueInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 }
 
 func UpdateInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
+	type CustomerEventInput struct {
+		MceID        int64  `json:"mce_id"`
+		IceStartDate string `json:"ice_start_date"`
+		IceEndDate   string `json:"ice_end_date"`
+	}
+	var customerEvents []CustomerEventInput
+
 	var req SysInfoProject
-	if err := c.BodyParser(&req); err != nil {
+	raw := c.Body()
+	if err := json.Unmarshal(raw, &req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid request", "detail": err.Error()})
+	}
+	var bodyMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &bodyMap); err == nil {
+		if evRaw, ok := bodyMap["customer_events"]; ok {
+			_ = json.Unmarshal(evRaw, &customerEvents)
+		}
 	}
 
 	if req.IpID == 0 {
@@ -693,66 +710,44 @@ func UpdateInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(500).JSON(5.9)
 	}
 
-	// upsert info_customer_event for this ip_id (includes new end-date fields)
-	eventParams := map[string]any{
-		"ip_id":                req.IpID,
-		"ice_k_ken_1_date":     req.IceKKen1Date,
-		"ice_k_ken_2_date":     req.IceKKen2Date,
-		"ice_1pp_date":         req.Ice1PPDate,
-		"ice_2pp_date":         req.Ice2PPDate,
-		"ice_pp_date":          req.IcePPDate,
-		"ice_sop_date":         req.IceSopDate,
-		"ice_k_ken_1_end_date": req.IceKKen1EndDate,
-		"ice_k_ken_2_end_date": req.IceKKen2EndDate,
-		"ice_1pp_end_date":     req.Ice1PPEndDate,
-		"ice_2pp_end_date":     req.Ice2PPEndDate,
-		"ice_pp_end_date":      req.IcePPEndDate,
-		"ice_sop_end_date":     req.IceSopEndDate,
-		"ice_updated_at":       now,
-		"ice_updated_by":       req.UpdatedBy,
-		"ice_status":           "active",
+	// delete existing info_customer_events rows for this ip_id, then insert new ones
+	if _, err = tx.Exec(`DELETE FROM info_customer_events WHERE ip_id = ?`, req.IpID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "delete info_customer_events failed", "detail": err.Error()})
 	}
-	// log.Printf("UpdateInfoProject - eventParams: %+v", eventParams)
 
-	res, err := tx.NamedExec(`
-		UPDATE info_customer_event SET
-			ice_k_ken_1_date = :ice_k_ken_1_date,
-			ice_k_ken_2_date = :ice_k_ken_2_date,
-			ice_1pp_date = :ice_1pp_date,
-			ice_2pp_date = :ice_2pp_date,
-			ice_pp_date = :ice_pp_date,
-			ice_sop_date = :ice_sop_date,
-			ice_k_ken_1_end_date = :ice_k_ken_1_end_date,
-			ice_k_ken_2_end_date = :ice_k_ken_2_end_date,
-			ice_1pp_end_date = :ice_1pp_end_date,
-			ice_2pp_end_date = :ice_2pp_end_date,
-			ice_pp_end_date = :ice_pp_end_date,
-			ice_sop_end_date = :ice_sop_end_date,
-			ice_updated_at = :ice_updated_at,
-			ice_updated_by = :ice_updated_by,
-			ice_status = :ice_status
-		WHERE ip_id = :ip_id
-	`, eventParams)
-	if err != nil {
-		// log.Printf("UpdateInfoProject - update info_customer_event error: %v", err)
-		return c.Status(500).JSON(5.10)
-	}
-	if ra, _ := res.RowsAffected(); ra == 0 {
-		// insert if no existing event
-		// reuse ice_updated_at/ice_updated_by as created values for simplicity
-		_, err = tx.NamedExec(`
-			INSERT INTO info_customer_event
-				(ip_id, ice_status, ice_created_at, ice_created_by,
-				 ice_k_ken_1_date, ice_k_ken_2_date, ice_1pp_date, ice_2pp_date, ice_pp_date, ice_sop_date,
-				 ice_k_ken_1_end_date, ice_k_ken_2_end_date, ice_1pp_end_date, ice_2pp_end_date, ice_pp_end_date, ice_sop_end_date)
-			VALUES
-				(:ip_id, :ice_status, :ice_updated_at, :ice_updated_by,
-				 :ice_k_ken_1_date, :ice_k_ken_2_date, :ice_1pp_date, :ice_2pp_date, :ice_pp_date, :ice_sop_date,
-				 :ice_k_ken_1_end_date, :ice_k_ken_2_end_date, :ice_1pp_end_date, :ice_2pp_end_date, :ice_pp_end_date, :ice_sop_end_date)
-		`, eventParams)
+	parseEventDate := func(s string) interface{} {
+		s = strings.TrimSpace(s)
+		if s == "" || s == "null" {
+			return nil
+		}
+		t, err := time.ParseInLocation("2006-01-02", s, time.Local)
 		if err != nil {
-			log.Printf("UpdateInfoProject - insert info_customer_event error: %v", err)
-			return c.Status(500).JSON(fiber.Map{"error": "insert info_customer_event failed", "detail": err.Error()})
+			return nil
+		}
+		return t
+	}
+
+	updatedBy := ""
+	if req.UpdatedBy.Valid {
+		updatedBy = req.UpdatedBy.String
+	}
+	for _, ev := range customerEvents {
+		var mceVal interface{}
+		if ev.MceID != 0 {
+			mceVal = ev.MceID
+		}
+		_, err := tx.Exec(`
+			INSERT INTO info_customer_events
+				(mce_id, ice_start_date, ice_end_date, ice_status_event,
+				 ice_created_at, ice_created_by, ice_updated_at, ice_updated_by, ip_id)
+			VALUES (?, ?, ?, 'inprogress', ?, ?, ?, ?, ?)`,
+			mceVal,
+			parseEventDate(ev.IceStartDate),
+			parseEventDate(ev.IceEndDate),
+			now, updatedBy, now, updatedBy, req.IpID,
+		)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "insert info_customer_events failed", "detail": err.Error()})
 		}
 	}
 
@@ -810,6 +805,7 @@ func SelectModel(c *fiber.Ctx, db *sqlx.DB) error {
 		Model        string           `db:"mmm_model" json:"mmm_model"`
 		CustomerName utils.NullString `db:"mmm_customer_name" json:"mmm_customer_name"`
 		MceID        utils.NullString `db:"mce_id" json:"mce_id"`
+		MceName      utils.NullString `db:"mce_name" json:"mce_name"`
 	}
 	if err := db.Select(&models, `SELECT 
 									mmm.mmm_id, 
@@ -2180,44 +2176,23 @@ func CustomerEventGanttChart(c *fiber.Ctx, db *sqlx.DB) error {
 		Status string `db:"status" json:"status"`
 	}
 
-	query := `SELECT
-  'Customer EVT Event' AS ` + "`group`" + `,
-  x.` + "`name`" + `,
-  x.` + "`start`" + `,
-  x.` + "`end`" + `,
-  CASE
-	WHEN x.` + "`start`" + ` IS NULL THEN ''
-	WHEN x.` + "`start`" + ` <= CURDATE() THEN 'Done'
-	ELSE 'In Process'
-  END AS ` + "`status`" + `
-	FROM (
-	SELECT 'K-KEN#1' AS ` + "`name`" + `, ice.ice_k_ken_1_date AS ` + "`start`" + `, ice.ice_k_ken_1_end_date AS ` + "`end`" + `
-	FROM info_customer_event ice WHERE ice.ip_id = ?
+	query := "SELECT " +
+		"'Customer EVT Event' AS `group`, " +
+		"mce.mce_name AS `name`, " +
+		"ice.ice_start_date AS `start`, " +
+		"ice.ice_end_date AS `end`, " +
+		"CASE " +
+		"  WHEN ice.ice_start_date IS NULL THEN '' " +
+		"  WHEN ice.ice_start_date <= CURDATE() THEN 'Done' " +
+		"  ELSE 'In Process' " +
+		"END AS `status` " +
+		"FROM info_customer_events ice " +
+		"LEFT JOIN mst_customer_event mce ON ice.mce_id = mce.mce_id " +
+		"WHERE ice.ip_id = ? " +
+		"AND ice.ice_start_date IS NOT NULL " +
+		"ORDER BY mce.mce_name"
 
-	UNION ALL
-	SELECT 'K-KEN#2', ice.ice_k_ken_2_date, ice.ice_k_ken_2_end_date
-	FROM info_customer_event ice WHERE ice.ip_id = ?
-
-	UNION ALL
-	SELECT '1PP', ice.ice_1pp_date, ice.ice_1pp_end_date
-	FROM info_customer_event ice WHERE ice.ip_id = ?
-
-	UNION ALL
-	SELECT '2PP', ice.ice_2pp_date, ice.ice_2pp_end_date
-	FROM info_customer_event ice WHERE ice.ip_id = ?
-
-	UNION ALL
-	SELECT 'PP', ice.ice_pp_date, ice.ice_pp_end_date
-	FROM info_customer_event ice WHERE ice.ip_id = ?
-
-	UNION ALL
-	SELECT 'SOP', ice.ice_sop_date, ice.ice_sop_end_date
-	FROM info_customer_event ice WHERE ice.ip_id = ?
-	) x
-	WHERE x.` + "`start`" + ` IS NOT NULL
-	ORDER BY x.` + "`name`" + `;`
-
-	if err := db.Select(&out, query, ipID, ipID, ipID, ipID, ipID, ipID); err != nil {
+	if err := db.Select(&out, query, ipID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
 

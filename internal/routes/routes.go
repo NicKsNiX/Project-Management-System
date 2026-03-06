@@ -165,7 +165,7 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Static("/uploads", `C:\inetpub\wwwroot\apiTrackingSystemUat\uploads`)
 }
 
-// http://192.168.161.219:9004/apiTrackingSystem/manageProject/InsertAPQPByPhase
+// http://192.168.161.219:9004/apiTrackingSystem/manageProject/UpdateInfoProject
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/InsertCustomerEvent
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEvent
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEventStatus
