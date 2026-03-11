@@ -125,18 +125,26 @@ func ListRemainTasks(c *fiber.Ctx, db *sqlx.DB) error {
 							
 				) x
 				LEFT JOIN info_approval a
-					ON a.ipid_id = x.ipid_id
+					ON a.ia_id = (
+						SELECT ia2.ia_id
+						FROM info_approval ia2
+						WHERE ia2.ipid_id = x.ipid_id
+							AND ia2.su_id = ?
+							AND ia2.ia_type = 'Leader'
+						ORDER BY COALESCE(ia2.ia_updated_at, ia2.ia_created_at) DESC, ia2.ia_id DESC
+						LIMIT 1
+					)
 				LEFT JOIN sys_user su
 					ON su.su_id = x.owner_su_id
 				LEFT JOIN sys_workflow sw 
 				    ON x.owner_su_id = sw.su_id 
-				WHERE a.ia_status = 'waiting' AND a.ia_is_action = 1 AND a.su_id = ? AND a.ia_type = 'Leader'
+				
 				ORDER BY
 					x.ip_code ASC,
 					x.item_type ASC,
 					x.mpp_id ASC;`
 
-	// placeholders: sd_id (apqp), sd_id (ppap), su_id
+	// placeholders: sd_id (apqp), sd_id (ppap), su_id for latest leader approval row
 	args := []interface{}{sdParam, sdParam, suParam}
 
 	var rows []struct {
@@ -670,10 +678,12 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 
 			// Send email to PJ (ipid_created_by)
 			var pjData []struct {
-				Email     string `db:"su_email"`
-				FirstName string `db:"su_firstname"`
+				SuID      int64         `db:"su_id"`
+				SdID      sql.NullInt64 `db:"sd_id"`
+				Email     string        `db:"su_email"`
+				FirstName string        `db:"su_firstname"`
 			}
-			_ = db.Select(&pjData, `SELECT su.su_email, su.su_firstname FROM sys_user su LEFT JOIN info_project_item_detail pid ON su.su_emp_code = pid.ipid_created_by WHERE pid.ipid_id = ? AND su.su_status = 'active' AND su.su_email IS NOT NULL AND su.su_email <> ''`, ipidID)
+			_ = db.Select(&pjData, `SELECT su.su_id, su.sd_id, su.su_email, su.su_firstname FROM sys_user su LEFT JOIN info_project_item_detail pid ON su.su_emp_code = pid.ipid_created_by WHERE pid.ipid_id = ? AND su.su_status = 'active' AND su.su_email IS NOT NULL AND su.su_email <> ''`, ipidID)
 			if len(pjData) > 0 {
 				for _, pj := range pjData {
 					pjEmailBody :=
@@ -681,7 +691,32 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 							`Dear, K.` + html.EscapeString(pj.FirstName) + `<br><br>` +
 							`</h3>` +
 							sb.String()
-					_ = SendMail([]string{pj.Email}, "TBKK Project Control Notification : waiting Approval", pjEmailBody, "text/html; charset=utf-8")
+					pjToEmail := strings.TrimSpace(pj.Email)
+					var pjCCEmails []string
+					if pj.SdID.Valid {
+						ccRows, ccErr := db.Queryx(`
+							SELECT su.su_email
+							FROM sys_workflow sw
+							JOIN sys_user su ON sw.su_id = su.su_id
+							WHERE sw.sd_id = ?
+							  AND sw.sw_status = 'active'
+							  AND su.su_status = 'active'
+							  AND su.su_email IS NOT NULL
+							  AND su.su_email <> ''
+						`, pj.SdID.Int64)
+						if ccErr == nil {
+							for ccRows.Next() {
+								var ccEmail sql.NullString
+								if err := ccRows.Scan(&ccEmail); err == nil && ccEmail.Valid {
+									if e := strings.TrimSpace(ccEmail.String); e != "" && !strings.EqualFold(e, pjToEmail) {
+										pjCCEmails = append(pjCCEmails, e)
+									}
+								}
+							}
+							ccRows.Close()
+						}
+					}
+					_ = SendMailWithCC([]string{pjToEmail}, pjCCEmails, "TBKK Project Control Notification : waiting Approval", pjEmailBody, "text/html; charset=utf-8")
 				}
 			}
 
@@ -697,7 +732,33 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 							`Dear, K.` + html.EscapeString(getStringValue(ownerFirstName)) + `<br><br>` +
 							`</h3>` +
 							sb.String()
-					_ = SendMail([]string{ownerEmail.String}, "TBKK Project Control Notification : File Approved", ownerEmailBody, "text/html; charset=utf-8")
+					ownerToEmail := strings.TrimSpace(ownerEmail.String)
+					var ownerCCEmails []string
+					var ownerSdID sql.NullInt64
+					if err := db.Get(&ownerSdID, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, detail.OwnerSuID.Int64); err == nil && ownerSdID.Valid {
+						ccRows, ccErr := db.Queryx(`
+							SELECT su.su_email
+							FROM sys_workflow sw
+							JOIN sys_user su ON sw.su_id = su.su_id
+							WHERE sw.sd_id = ?
+							  AND sw.sw_status = 'active'
+							  AND su.su_status = 'active'
+							  AND su.su_email IS NOT NULL
+							  AND su.su_email <> ''
+						`, ownerSdID.Int64)
+						if ccErr == nil {
+							for ccRows.Next() {
+								var ccEmail sql.NullString
+								if err := ccRows.Scan(&ccEmail); err == nil && ccEmail.Valid {
+									if e := strings.TrimSpace(ccEmail.String); e != "" && !strings.EqualFold(e, ownerToEmail) {
+										ownerCCEmails = append(ownerCCEmails, e)
+									}
+								}
+							}
+							ccRows.Close()
+						}
+					}
+					_ = SendMailWithCC([]string{ownerToEmail}, ownerCCEmails, "TBKK Project Control Notification : File Approved", ownerEmailBody, "text/html; charset=utf-8")
 				}
 			}
 		}

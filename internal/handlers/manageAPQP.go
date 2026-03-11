@@ -336,6 +336,7 @@ func GetListAPQPPhase(c *fiber.Ctx, db *sqlx.DB) error {
 
 	query := `
 		SELECT
+			COALESCE(iai.ip_id, ?) AS ip_id,
 			ma.mpp_id AS mpp_id,
 			ma.ma_id AS ma_id,
 			mmpd.ma_id AS mmpd_ma_id,
@@ -358,7 +359,8 @@ func GetListAPQPPhase(c *fiber.Ctx, db *sqlx.DB) error {
                          AND mtd.mmp_id IS NOT NULL
                     THEN 1
                 ELSE 0
-            END AS status
+            END AS status,
+			ipid.ipid_status_flg
 		FROM mst_apqp ma
 		LEFT JOIN info_apqp_item iai ON iai.iai_name = ma.ma_name AND iai.ip_id = ?
 		LEFT JOIN info_project_item_detail ipid ON ipid.ref_id = iai.iai_id AND ipid.ipid_type = 'apqp'
@@ -367,17 +369,18 @@ func GetListAPQPPhase(c *fiber.Ctx, db *sqlx.DB) error {
         LEFT JOIN mst_master_plan mmp ON mmpd.mmp_id = mmp.mmp_id
         LEFT JOIN info_project_master_plan ipmp ON ipmp.ipmp_name = mmp.mmp_name AND ipmp.ip_id = ?
 		AND ma.ma_status = 'active'
-		GROUP BY mmpd.ma_id, ma.ma_name, ma.mpp_id, ma.ma_id, ipid.ipid_start_date, ipid.ipid_end_date, ipid.sd_id, ipid.su_id, ipid.ipid_line_code
+		GROUP BY mmpd.ma_id, ma.ma_name, ma.mpp_id, ma.ma_id, ipid.ipid_start_date, ipid.ipid_end_date, ipid.sd_id, ipid.su_id, ipid.ipid_line_code,ipid.ipid_status_flg
 		ORDER BY ma.mpp_id, ma.ma_id ASC
 	`
 
-	q, args, err := sqlx.In(query, ipID, ipID, ids, ipID, ipID)
+	q, args, err := sqlx.In(query, ipID, ipID, ipID, ids, ipID, ipID)
 	if err != nil {
 		return c.Status(500).JSON(5)
 	}
 	q = db.Rebind(q)
 
 	var list []struct {
+		IpID          int64            `db:"ip_id" json:"ip_id"`
 		MppID         int64            `db:"mpp_id" json:"mpp_id"`
 		MaID          int64            `db:"ma_id" json:"ma_id"`
 		MmpdMaID      utils.NullInt64  `db:"mmpd_ma_id" json:"mmpd_ma_id"`
@@ -390,6 +393,7 @@ func GetListAPQPPhase(c *fiber.Ctx, db *sqlx.DB) error {
 		IpmpStartDate *time.Time       `db:"ipmp_start_date" json:"ipmp_start_date"`
 		IpmpEndDate   *time.Time       `db:"ipmp_end_date" json:"ipmp_end_date"`
 		Status        int              `db:"status" json:"status"`
+		StatusFlag    utils.NullString `db:"ipid_status_flg" json:"ipid_status_flg"`
 	}
 
 	if err := db.Select(&list, q, args...); err != nil {

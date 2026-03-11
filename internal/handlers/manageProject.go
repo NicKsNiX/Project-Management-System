@@ -105,6 +105,28 @@ type DateTime struct {
 
 type StringOrArray []string
 
+func (s *StringOrArray) Scan(src interface{}) error {
+	if src == nil {
+		*s = nil
+		return nil
+	}
+	var raw string
+	switch v := src.(type) {
+	case []byte:
+		raw = string(v)
+	case string:
+		raw = v
+	default:
+		return fmt.Errorf("unsupported scan source for StringOrArray: %T", src)
+	}
+	if raw == "" {
+		*s = nil
+		return nil
+	}
+	*s = strings.Split(raw, ",")
+	return nil
+}
+
 func (s *StringOrArray) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" || len(b) == 0 {
 		*s = nil
@@ -241,8 +263,10 @@ type SysInfoProject struct {
 	IceUpdatedAt    *DateTime        `json:"ice_updated_at" db:"ice_updated_at"`
 	IceUpdatedBy    utils.NullString `json:"ice_updated_by" db:"ice_updated_by"`
 
+	MceID   utils.NullString `json:"mce_id" db:"mce_id"`
 	MceName utils.NullString `json:"mce_name" db:"mce_name"`
 
+	IceID        utils.NullString `json:"ice_id" db:"ice_id"`
 	IceStartDate utils.NullString `json:"ice_start_date" db:"ice_start_date"`
 	IceEndDate   utils.NullString `json:"ice_end_date" db:"ice_end_date"`
 
@@ -296,7 +320,9 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 					ipf.ipf_file_name AS ipf_file_name,
 					ipf.ipf_file_path AS ipf_file_path,
 					mt.mt_name AS mt_name,
+					mceAgg.mce_id AS mce_id,
 					mceAgg.mce_names AS mce_name,
+					ices.ice_id AS ice_id,
 					ices.ice_start_date,
 					ices.ice_end_date,
 					IFNULL(itf.tracking_file_count, 0) AS tracking_file_count
@@ -319,8 +345,10 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 				LEFT JOIN (
 					SELECT
 						mmm_id,
-						GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_name SEPARATOR ', ') AS mce_names
+						GROUP_CONCAT(DISTINCT mce_id ORDER BY mce_id SEPARATOR ',') AS mce_id,
+						GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_name SEPARATOR ',') AS mce_names
 					FROM mst_customer_event
+					WHERE mce_status = 'active'
 					GROUP BY mmm_id
 				) mceAgg
 					ON mmm.mmm_id = mceAgg.mmm_id
@@ -328,9 +356,11 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 				LEFT JOIN (
                     SELECT 
                         ip_id,
+						GROUP_CONCAT(ice_id ORDER BY ice_id SEPARATOR ',') AS ice_id,
                         GROUP_CONCAT(ice_start_date ORDER BY ice_id SEPARATOR ',') AS ice_start_date,
                         GROUP_CONCAT(ice_end_date ORDER BY ice_id SEPARATOR ',') AS ice_end_date
                     FROM info_customer_events
+					
                     GROUP BY ip_id
 				) ices
 				    ON info_project.ip_id = ices.ip_id
@@ -896,7 +926,7 @@ func SelectCountAddedStatus(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 
 	var count int
-	if err := db.Get(&count, `SELECT COUNT(*) FROM info_project WHERE ip_status = 'added'`); err != nil {
+	if err := db.Get(&count, `SELECT COUNT(*) FROM info_project WHERE ip_status = 'added' OR ip_status='draft'`); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
 	return c.Status(200).JSON(fiber.Map{"count": count})
@@ -1218,41 +1248,15 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// cleanup: delete any existing info_apqp_item for this ip_id whose name is NOT in incoming list
-	incoming := map[string]struct{}{}
-	for _, nm := range body.MaName {
-		incoming[strings.TrimSpace(nm)] = struct{}{}
-	}
-	var existingItems []struct {
-		IaiID   int64  `db:"iai_id"`
-		IaiName string `db:"iai_name"`
-	}
-	if err := tx.Select(&existingItems, `SELECT iai_id, iai_name FROM info_apqp_item WHERE ip_id = ?`, body.IpID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "query existing apqp items failed", "detail": err.Error()})
-	}
-	for _, it := range existingItems {
-		nm := strings.TrimSpace(it.IaiName)
-		if _, ok := incoming[nm]; !ok {
-			// delete details (only type 'apqp') then delete the apqp item
-			if _, err := tx.Exec(`DELETE FROM info_project_item_detail WHERE ref_id = ? AND ipid_type = 'apqp'`, it.IaiID); err != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "delete apqp details failed", "detail": err.Error()})
-			}
-			if _, err := tx.Exec(`DELETE FROM info_apqp_item WHERE iai_id = ?`, it.IaiID); err != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "delete apqp item failed", "detail": err.Error()})
-			}
-		}
-	}
-
-	// info_approval insertion intentionally removed
-
 	// helper: upsert a single info_project_item_detail row (avoid duplicates)
 	upsertDetail := func(refID interface{}, sd interface{}, su interface{}, line interface{}, start interface{}, end interface{}) (int64, error) {
 		var existing struct {
-			IpidID int64        `db:"ipid_id"`
-			Start  sql.NullTime `db:"ipid_start_date"`
-			End    sql.NullTime `db:"ipid_end_date"`
+			IpidID    int64          `db:"ipid_id"`
+			Start     sql.NullTime   `db:"ipid_start_date"`
+			End       sql.NullTime   `db:"ipid_end_date"`
+			StatusFlg sql.NullString `db:"ipid_status_flg"`
 		}
-		sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'apqp' LIMIT 1`
+		sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'apqp' LIMIT 1`
 		if err := tx.Get(&existing, sel, refID, sd, sd, su, su, line, line); err == nil {
 			needUpdate := false
 			// start
@@ -1277,7 +1281,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 			ipidID := existing.IpidID
 			if needUpdate {
-				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
+				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ?, ipid_status_flg = 'sendandsubmit' WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
 					return 0, err
 				}
 			}
@@ -1300,7 +1304,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 				LIMIT 1`
 			if err2 := tx.Get(&candidate, sel2, refID, sd, sd, su, su, line, line); err2 == nil {
 				// Build UPDATE that sets only columns for which incoming value is non-nil
-				parts := []string{"ipid_start_date = ?", "ipid_end_date = ?", "ipid_updated_at = ?", "ipid_updated_by = ?"}
+				parts := []string{"ipid_start_date = ?", "ipid_end_date = ?", "ipid_updated_at = ?", "ipid_updated_by = ?", "ipid_status_flg = 'sendbyphase'"}
 				args := []interface{}{start, end, now, body.CreatedBy}
 				if sd != nil {
 					parts = append([]string{"sd_id = ?"}, parts...)
@@ -1324,8 +1328,8 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 
 			// no candidate -> insert new row
-			res, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				refID, sd, su, line, "apqp", start, end, "inprogress", now, body.CreatedBy, now, body.CreatedBy,
+			res, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				refID, sd, su, line, "apqp", start, end, "inprogress", "sendandsubmit", now, body.CreatedBy, now, body.CreatedBy,
 			)
 			if err != nil {
 				return 0, err
@@ -1781,41 +1785,15 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// cleanup: delete any existing info_apqp_item for this ip_id whose name is NOT in incoming list
-	incoming := map[string]struct{}{}
-	for _, nm := range body.MaName {
-		incoming[strings.TrimSpace(nm)] = struct{}{}
-	}
-	var existingItems []struct {
-		IaiID   int64  `db:"iai_id"`
-		IaiName string `db:"iai_name"`
-	}
-	if err := tx.Select(&existingItems, `SELECT iai_id, iai_name FROM info_apqp_item WHERE ip_id = ?`, body.IpID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "query existing apqp items failed", "detail": err.Error()})
-	}
-	for _, it := range existingItems {
-		nm := strings.TrimSpace(it.IaiName)
-		if _, ok := incoming[nm]; !ok {
-			// delete details (only type 'apqp') then delete the apqp item
-			if _, err := tx.Exec(`DELETE FROM info_project_item_detail WHERE ref_id = ? AND ipid_type = 'apqp'`, it.IaiID); err != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "delete apqp details failed", "detail": err.Error()})
-			}
-			if _, err := tx.Exec(`DELETE FROM info_apqp_item WHERE iai_id = ?`, it.IaiID); err != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "delete apqp item failed", "detail": err.Error()})
-			}
-		}
-	}
-
-	// info_approval insertion intentionally removed
-
 	// helper: upsert a single info_project_item_detail row (avoid duplicates)
 	upsertDetail := func(refID interface{}, sd interface{}, su interface{}, line interface{}, start interface{}, end interface{}) (int64, error) {
 		var existing struct {
-			IpidID int64        `db:"ipid_id"`
-			Start  sql.NullTime `db:"ipid_start_date"`
-			End    sql.NullTime `db:"ipid_end_date"`
+			IpidID    int64          `db:"ipid_id"`
+			Start     sql.NullTime   `db:"ipid_start_date"`
+			End       sql.NullTime   `db:"ipid_end_date"`
+			StatusFlg sql.NullString `db:"ipid_status_flg"`
 		}
-		sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'apqp' LIMIT 1`
+		sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'apqp' LIMIT 1`
 		if err := tx.Get(&existing, sel, refID, sd, sd, su, su, line, line); err == nil {
 			needUpdate := false
 			// start
@@ -1838,9 +1816,12 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 					}
 				}
 			}
+			if !needUpdate && existing.StatusFlg.Valid && existing.StatusFlg.String == "sendandsubmit" {
+				needUpdate = true
+			}
 			ipidID := existing.IpidID
 			if needUpdate {
-				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
+				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ?, ipid_status_flg = 'sendbyphase' WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
 					return 0, err
 				}
 			}
@@ -1851,11 +1832,12 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 
 			var candidate struct {
-				IpidID int64        `db:"ipid_id"`
-				Start  sql.NullTime `db:"ipid_start_date"`
-				End    sql.NullTime `db:"ipid_end_date"`
+				IpidID    int64          `db:"ipid_id"`
+				Start     sql.NullTime   `db:"ipid_start_date"`
+				End       sql.NullTime   `db:"ipid_end_date"`
+				StatusFlg sql.NullString `db:"ipid_status_flg"`
 			}
-			sel2 := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail
+			sel2 := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail
 				WHERE ref_id = ? AND ipid_type = 'apqp'
 				AND ((? IS NULL) OR sd_id = ? OR sd_id IS NULL)
 				AND ((? IS NULL) OR su_id = ? OR su_id IS NULL)
@@ -1863,7 +1845,7 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 				LIMIT 1`
 			if err2 := tx.Get(&candidate, sel2, refID, sd, sd, su, su, line, line); err2 == nil {
 				// Build UPDATE that sets only columns for which incoming value is non-nil
-				parts := []string{"ipid_start_date = ?", "ipid_end_date = ?", "ipid_updated_at = ?", "ipid_updated_by = ?"}
+				parts := []string{"ipid_start_date = ?", "ipid_end_date = ?", "ipid_updated_at = ?", "ipid_updated_by = ?", "ipid_status_flg = 'sendbyphase'"}
 				args := []interface{}{start, end, now, body.CreatedBy}
 				if sd != nil {
 					parts = append([]string{"sd_id = ?"}, parts...)
@@ -1887,8 +1869,8 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 
 			// no candidate -> insert new row
-			res, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				refID, sd, su, line, "apqp", start, end, "inprogress", now, body.CreatedBy, now, body.CreatedBy,
+			res, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				refID, sd, su, line, "apqp", start, end, "inprogress", "sendbyphase", now, body.CreatedBy, now, body.CreatedBy,
 			)
 			if err != nil {
 				return 0, err
@@ -2053,8 +2035,10 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 	// ---- Send notification email to all processed su_ids ----
 	if len(seenSuIDs) > 0 {
 		go func() {
-			// Collect emails for all processed users
+			// Collect emails for all processed users (include sd_id and su_id for CC lookup)
 			type UserInfo struct {
+				SuID      int64          `db:"su_id"`
+				SdID      sql.NullInt64  `db:"sd_id"`
 				Email     sql.NullString `db:"su_email"`
 				Firstname sql.NullString `db:"su_firstname"`
 				Lastname  sql.NullString `db:"su_lastname"`
@@ -2066,7 +2050,7 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 				suSlice = append(suSlice, id)
 			}
 			query, args, err := sqlx.In(
-				`SELECT su_email, su_firstname, su_lastname FROM sys_user WHERE su_id IN (?) AND su_status = 'active' AND su_email IS NOT NULL AND su_email <> ''`,
+				`SELECT su_id, sd_id, su_email, su_firstname, su_lastname FROM sys_user WHERE su_id IN (?) AND su_status = 'active' AND su_email IS NOT NULL AND su_email <> ''`,
 				suSlice,
 			)
 			if err != nil {
@@ -2098,59 +2082,128 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 				return "-"
 			}
 
-			// Build email recipients list
-			tos := make([]string, 0, len(userInfos))
-			for _, u := range userInfos {
-				if u.Email.Valid && strings.TrimSpace(u.Email.String) != "" {
-					tos = append(tos, strings.TrimSpace(u.Email.String))
+			// getCCEmails returns emails of all active workflow users sharing the same sd_id,
+			// excluding the primary recipient's own email.
+			getCCEmails := func(sdID int64, excludeEmail string) []string {
+				var ccEmails []string
+				rows, err := db.Queryx(`
+					SELECT su.su_email
+					FROM sys_workflow sw
+					JOIN sys_user su ON sw.su_id = su.su_id
+					WHERE sw.sd_id = ?
+					  AND sw.sw_status = 'active'
+					  AND su.su_status = 'active'
+					  AND su.su_email IS NOT NULL
+					  AND su.su_email <> ''
+				`, sdID)
+				if err != nil {
+					log.Printf("InsertAPQPByPhase mail: query workflow cc error: %v", err)
+					return nil
 				}
+				defer rows.Close()
+				for rows.Next() {
+					var email sql.NullString
+					if err := rows.Scan(&email); err != nil {
+						continue
+					}
+					if email.Valid {
+						e := strings.TrimSpace(email.String)
+						if e != "" && !strings.EqualFold(e, excludeEmail) {
+							ccEmails = append(ccEmails, e)
+						}
+					}
+				}
+				return ccEmails
 			}
-			if len(tos) == 0 {
-				return
-			}
-
-			// Build HTML email body
-			var sb strings.Builder
-			sb.WriteString("<html><body style='font-family:Arial,sans-serif; background:#f6f8fb; padding:20px;'>")
-			sb.WriteString("<div style='max-width:680px; margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:24px;'>")
-			sb.WriteString("<div style='font-size:20px; font-weight:bold; color:#1f2d3d;'>TBKK Project Control – Task Assignment</div>")
-			sb.WriteString("<div style='font-size:13px; color:#6b7280; margin-bottom:16px;'>You have been assigned to an APQP task.</div>")
-			sb.WriteString("<hr style='border:none; border-top:1px dashed #d1d5db; margin:12px 0;'>")
-
-			// Project info table
-			sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse;'>")
-			sb.WriteString("<tr>")
-			sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>PROJECT CODE</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>#" + html.EscapeString(getStr(proj.IpCode)) + "</div>")
-			sb.WriteString("</td>")
-			sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>MODEL</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpModel)) + "</div>")
-			sb.WriteString("</td>")
-			sb.WriteString("</tr><tr>")
-			sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NO</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpPartNo)) + "</div>")
-			sb.WriteString("</td>")
-			sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NAME</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpPartName)) + "</div>")
-			sb.WriteString("</td>")
-			sb.WriteString("</tr></table>")
-
-			sb.WriteString("<div style='margin-top:20px;'>")
-			sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
-			sb.WriteString("</div>")
-
-			sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
-			sb.WriteString("<p>Best Regards,<br><strong>System Service Department</strong></p>")
-			sb.WriteString("</div>")
-			sb.WriteString("</div></body></html>")
 
 			subject := "TBKK Project Control Notification : Task Assignment"
-			if mailErr := SendMail(tos, subject, sb.String(), "text/html; charset=utf-8"); mailErr != nil {
-				log.Printf("InsertAPQPByPhase mail: send error: %v", mailErr)
+
+			// Send individual emails so each recipient gets a personalized greeting
+			for _, u := range userInfos {
+				if !u.Email.Valid || strings.TrimSpace(u.Email.String) == "" {
+					continue
+				}
+				toEmail := strings.TrimSpace(u.Email.String)
+				firstname := "User"
+				if u.Firstname.Valid && strings.TrimSpace(u.Firstname.String) != "" {
+					firstname = strings.TrimSpace(u.Firstname.String)
+				}
+
+				// Build CC list from sys_workflow by sd_id
+				var ccEmails []string
+				if u.SdID.Valid {
+					ccEmails = getCCEmails(u.SdID.Int64, toEmail)
+				}
+
+				var sb strings.Builder
+				sb.WriteString("<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>Dear, K." + html.EscapeString(firstname) + "</h3>")
+				sb.WriteString("<h4>You have been assigned to an <b style='color: #2374e4;'>Upload file</b> in website Project Management</h4>")
+				sb.WriteString("<html><body style='font-family: Arial, sans-serif; background:#f6f8fb; padding:20px;'>")
+
+				// Project Detail Card
+				sb.WriteString("<div style='margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:20px;'>")
+				sb.WriteString("<div style='font-size:18px; font-weight:bold; color:#1f2d3d;'>Project Detail</div>")
+				sb.WriteString("<div style='font-size:12px; color:#6b7280;'>Item Information</div>")
+				sb.WriteString("<hr style='border:none; border-top:1px dashed #d1d5db; margin:15px 0;'>")
+
+				// Project Information 2-Column Layout
+				sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse;'>")
+				sb.WriteString("<tr>")
+				sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+				sb.WriteString("<div style='font-size:12px; color:#374151;'>PROJECT CODE</div>")
+				sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>#" + html.EscapeString(getStr(proj.IpCode)) + "</div>")
+				sb.WriteString("</td>")
+				sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+				sb.WriteString("<div style='font-size:12px; color:#374151;'>MODEL</div>")
+				sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpModel)) + "</div>")
+				sb.WriteString("</td>")
+				sb.WriteString("</tr>")
+				sb.WriteString("<tr>")
+				sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+				sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NO</div>")
+				sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpPartNo)) + "</div>")
+				sb.WriteString("</td>")
+				sb.WriteString("<td colspan='1' style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
+				sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NAME</div>")
+				sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(proj.IpPartName)) + "</div>")
+				sb.WriteString("</td>")
+				sb.WriteString("</tr>")
+				sb.WriteString("</table>")
+				sb.WriteString("<div style='margin-top:20px; font-size:14px; color:#374151;'>")
+				sb.WriteString("</div>")
+				sb.WriteString("</div><br>")
+
+				// Assigned Tasks Table
+				sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse; border:1px solid #e5e7eb;'>")
+				sb.WriteString("<thead><tr style='background:#f3f4f6; border-bottom:2px solid #d1d5db;'>")
+				cols := []string{"No.", "APQP"}
+				for _, col := range cols {
+					sb.WriteString("<th style='text-align:left; font-weight:bold; color:#374151; font-size:13px;'>" + html.EscapeString(col) + "</th>")
+				}
+				sb.WriteString("</tr></thead><tbody>")
+				for idx, mn := range body.MaName {
+					rowBg := ""
+					if idx%2 == 0 {
+						rowBg = " style='background:#fbfdff;'"
+					}
+					sb.WriteString("<tr" + rowBg + ">")
+					sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + strconv.Itoa(idx+1) + "</td>")
+					sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(mn) + "</td>")
+					sb.WriteString("</tr>")
+				}
+				sb.WriteString("</tbody></table>")
+
+				sb.WriteString("<div style='margin-top:20px;'>")
+				sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
+				sb.WriteString("</div>")
+				sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
+				sb.WriteString("<p>Best Regards,<br><strong>System Service Department</strong></p>")
+				sb.WriteString("</div>")
+				sb.WriteString("</body></html>")
+
+				if mailErr := SendMailWithCC([]string{toEmail}, ccEmails, subject, sb.String(), "text/html; charset=utf-8"); mailErr != nil {
+					log.Printf("InsertAPQPByPhase mail: send error: %v", mailErr)
+				}
 			}
 		}()
 	}
@@ -2687,7 +2740,7 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 				approverName = UpdateBy
 			}
 
-			sb.WriteString("<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>Dear, " + html.EscapeString(ownerStr) + "</h3>")
+			sb.WriteString("<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>Dear K." + html.EscapeString(ownerStr) + "</h3>")
 
 			// Determine status text based on status value
 			var statusText string
@@ -2805,7 +2858,43 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 
 			if ownerEmail.Valid && strings.TrimSpace(ownerEmail.String) != "" {
-				_ = SendMail([]string{ownerEmail.String}, subject, sb.String(), "text/html; charset=utf-8")
+				toEmail := strings.TrimSpace(ownerEmail.String)
+
+				// Build CC list from sys_workflow by owner's sd_id (exclude owner's own email)
+				var ccEmails []string
+				if detail.OwnerSuID.Valid {
+					var ownerSdID sql.NullInt64
+					_ = db.Get(&ownerSdID, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, detail.OwnerSuID.Int64)
+					if ownerSdID.Valid {
+						rows, err := db.Queryx(`
+							SELECT su.su_email
+							FROM sys_workflow sw
+							JOIN sys_user su ON sw.su_id = su.su_id
+							WHERE sw.sd_id = ?
+							  AND sw.sw_status = 'active'
+							  AND su.su_status = 'active'
+							  AND su.su_email IS NOT NULL
+							  AND su.su_email <> ''
+						`, ownerSdID.Int64)
+						if err == nil {
+							defer rows.Close()
+							for rows.Next() {
+								var ccEmail sql.NullString
+								if err := rows.Scan(&ccEmail); err != nil {
+									continue
+								}
+								if ccEmail.Valid {
+									e := strings.TrimSpace(ccEmail.String)
+									if e != "" && !strings.EqualFold(e, toEmail) {
+										ccEmails = append(ccEmails, e)
+									}
+								}
+							}
+						}
+					}
+				}
+
+				_ = SendMailWithCC([]string{toEmail}, ccEmails, subject, sb.String(), "text/html; charset=utf-8")
 			}
 		}
 	}

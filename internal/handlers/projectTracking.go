@@ -124,7 +124,7 @@ func ListProjectItemDetails(c *fiber.Ctx, db *sqlx.DB) error {
 			args = append(args, ipStatusParam)
 		}
 	}
-	query += `WHERE p.ip_status = 'inprogress'`
+	query += `WHERE p.ip_status = 'inprogress' OR dd.ipid_status = 'inprogress' OR dd.ipid_status = 'delay'`
 	query += `GROUP BY
 				p.ip_id, p.ip_code, p.ip_model, p.ip_part_no, p.ip_status,
 				p.ip_created_by, p.ip_created_at, su.su_firstname, su.su_lastname
@@ -158,6 +158,7 @@ func CountProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					ON ip.ip_id = ipi.ip_id
 				WHERE ipid.su_id = ?
 					AND ip.ip_status = 'inprogress'
+					OR ipid.ipid_status = 'inprogress'
 					AND ipid.ipid_type = 'ppap'
 
 				UNION
@@ -171,6 +172,7 @@ func CountProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					ON ip.ip_id = iai.ip_id
 				WHERE ipid.su_id = ?
 					AND ip.ip_status = 'inprogress'
+					OR ipid.ipid_status = 'inprogress'
 					AND ipid.ipid_type = 'apqp'
 				) t;
 
@@ -939,7 +941,33 @@ func InsertProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 
 			subject := "TBKK Project Control Notification : waiting Leader Approval"
 			body := sb.String()
-			_ = SendMail([]string{suEmail.String}, subject, body, "text/html; charset=utf-8")
+			toEmail := strings.TrimSpace(suEmail.String)
+			var ccEmails []string
+			var approverSdID sql.NullInt64
+			if err := db.Get(&approverSdID, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, approverSuID); err == nil && approverSdID.Valid {
+				ccRows, ccErr := db.Queryx(`
+					SELECT su.su_email
+					FROM sys_workflow sw
+					JOIN sys_user su ON sw.su_id = su.su_id
+					WHERE sw.sd_id = ?
+					  AND sw.sw_status = 'active'
+					  AND su.su_status = 'active'
+					  AND su.su_email IS NOT NULL
+					  AND su.su_email <> ''
+				`, approverSdID.Int64)
+				if ccErr == nil {
+					for ccRows.Next() {
+						var ccEmail sql.NullString
+						if err := ccRows.Scan(&ccEmail); err == nil && ccEmail.Valid {
+							if e := strings.TrimSpace(ccEmail.String); e != "" && !strings.EqualFold(e, toEmail) {
+								ccEmails = append(ccEmails, e)
+							}
+						}
+					}
+					ccRows.Close()
+				}
+			}
+			_ = SendMailWithCC([]string{toEmail}, ccEmails, subject, body, "text/html; charset=utf-8")
 		}
 	}
 

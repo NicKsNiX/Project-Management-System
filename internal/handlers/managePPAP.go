@@ -63,9 +63,6 @@ func InsertPPAPItem(c *fiber.Ctx, db *sqlx.DB) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid request", "detail": err.Error()})
 	}
-	if body.Name == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "mpi_name is required"})
-	}
 	if body.CreatedBy == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "mpi_created_by is required"})
 	}
@@ -252,20 +249,19 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 	if body.IpID == 0 {
 		return c.Status(400).JSON(fiber.Map{"error": "ip_id is required"})
 	}
-	if len(body.IpiName) == 0 {
-		return c.Status(400).JSON(fiber.Map{"error": "ipi_name is required"})
-	}
-	// arrays must align with ipi_name length
-	n := len(body.IpiName)
-	// sd_id is derived from su_id (sys_user.sd_id). frontend should not send sd_id.
-	if len(body.SuID) != 0 && len(body.SuID) != n {
-		return c.Status(400).JSON(fiber.Map{"error": "su_id length must match ipi_name length"})
-	}
-	if len(body.IpidLineCode) != 0 && len(body.IpidLineCode) != n {
-		return c.Status(400).JSON(fiber.Map{"error": "ipid_line_code length must match ipi_name length"})
-	}
 	if body.CreatedBy == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "created_by is required"})
+	}
+	// arrays must align with ipi_name length when PPAP items are provided
+	n := len(body.IpiName)
+	if n > 0 {
+		// sd_id is derived from su_id (sys_user.sd_id). frontend should not send sd_id.
+		if len(body.SuID) != 0 && len(body.SuID) != n {
+			return c.Status(400).JSON(fiber.Map{"error": "su_id length must match ipi_name length"})
+		}
+		if len(body.IpidLineCode) != 0 && len(body.IpidLineCode) != n {
+			return c.Status(400).JSON(fiber.Map{"error": "ipid_line_code length must match ipi_name length"})
+		}
 	}
 
 	tx, err := db.Beginx()
@@ -277,6 +273,18 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 	}()
 
 	now := time.Now()
+
+	if n == 0 {
+		if _, err := tx.Exec(`UPDATE info_project SET ip_status = ?, ip_updated_at = ?, ip_updated_by = ? WHERE ip_id = ?`, "inprogress", now, body.CreatedBy, body.IpID); err != nil {
+			return c.Status(500).JSON(5)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return c.Status(500).JSON(5)
+		}
+
+		return c.Status(201).JSON(1)
+	}
 
 	// Support ipid_start_date / ipid_end_date as 0, 1 or N values (N == len(ipi_name)).
 	if !(len(body.IpidStartDate) == 0 || len(body.IpidStartDate) == 1 || len(body.IpidStartDate) == n) {
@@ -869,7 +877,7 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 							ON ai.iai_id = pid.ref_id
 							AND pid.ipid_type = 'apqp'
                         
-							WHERE ai.ip_id = ?
+							WHERE ai.ip_id = ? AND pid.ipid_status_flg <> 'sendbyphase'
 
 						UNION ALL
 
@@ -956,9 +964,9 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 						var sb strings.Builder
 						var i int
 						sb.WriteString("<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>Dear, K." + html.EscapeString(recipientName) + "</h3>")
-						sb.WriteString("<h4>You have new project please upload your <b style='color : #0952c0;'>file</b> in website Project Management</h4>")
+						sb.WriteString("<h4>You have new project please <b style='color : #0952c0;'>Upload file</b> in website Project Management</h4>")
 						sb.WriteString("<html><body style='font-family: Arial, sans-serif; background:#f6f8fb; padding:20px;'>")
-							
+
 						// Project Detail Card
 						sb.WriteString("<div style='margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:20px;'>")
 						sb.WriteString("<div style='font-size:18px; font-weight:bold; color:#1f2d3d;'>Project Detail</div>")
@@ -998,7 +1006,7 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 						sb.WriteString("<div style='margin-top:20px; font-size:14px; color:#374151;'>")
 						sb.WriteString("</div>")
 						sb.WriteString("</div><br>")
-						
+
 						// Items Table
 						sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse; border:1px solid #e5e7eb;'>")
 						sb.WriteString("<thead><tr style='background:#f3f4f6; border-bottom:2px solid #d1d5db;'>")
@@ -1056,12 +1064,40 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 							continue
 						}
 
+						// Build CC list from sys_workflow by recipient's sd_id
+						ppapToEmail := strings.TrimSpace(email)
+						var ppapCCEmails []string
+						var ppapSdID sql.NullInt64
+						if err := db.Get(&ppapSdID, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, suID); err == nil && ppapSdID.Valid {
+							ccRows, ccErr := db.Queryx(`
+								SELECT su.su_email
+								FROM sys_workflow sw
+								JOIN sys_user su ON sw.su_id = su.su_id
+								WHERE sw.sd_id = ?
+								  AND sw.sw_status = 'active'
+								  AND su.su_status = 'active'
+								  AND su.su_email IS NOT NULL
+								  AND su.su_email <> ''
+							`, ppapSdID.Int64)
+							if ccErr == nil {
+								for ccRows.Next() {
+									var ccEmail sql.NullString
+									if err := ccRows.Scan(&ccEmail); err == nil && ccEmail.Valid {
+										if e := strings.TrimSpace(ccEmail.String); e != "" && !strings.EqualFold(e, ppapToEmail) {
+											ppapCCEmails = append(ppapCCEmails, e)
+										}
+									}
+								}
+								ccRows.Close()
+							}
+						}
+
 						// send asynchronously to the single recipient
-						go func(to string) {
-							if err := SendMail([]string{to}, subject, bodyHtml, "text/html; charset=utf-8"); err != nil {
+						go func(to string, cc []string) {
+							if err := SendMailWithCC([]string{to}, cc, subject, bodyHtml, "text/html; charset=utf-8"); err != nil {
 								log.Printf("SendMail error: %v", err)
 							}
-						}(email)
+						}(ppapToEmail, ppapCCEmails)
 					}
 				}
 			}
@@ -1088,22 +1124,21 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 	if body.IpID == 0 {
 		return c.Status(400).JSON(fiber.Map{"error": "ip_id is required"})
 	}
-	if len(body.IpiName) == 0 {
-		return c.Status(400).JSON(fiber.Map{"error": "ipi_name is required"})
-	}
-	// arrays must align with ipi_name length
-	n := len(body.IpiName)
-	if len(body.SdID) != 0 && len(body.SdID) != n {
-		return c.Status(400).JSON(fiber.Map{"error": "sd_id length must match ipi_name length"})
-	}
-	if len(body.SuID) != 0 && len(body.SuID) != n {
-		return c.Status(400).JSON(fiber.Map{"error": "su_id length must match ipi_name length"})
-	}
-	if len(body.IpidLineCode) != 0 && len(body.IpidLineCode) != n {
-		return c.Status(400).JSON(fiber.Map{"error": "ipid_line_code length must match ipi_name length"})
-	}
 	if body.CreatedBy == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "created_by is required"})
+	}
+	// arrays must align with ipi_name length when PPAP items are provided
+	n := len(body.IpiName)
+	if n > 0 {
+		if len(body.SdID) != 0 && len(body.SdID) != n {
+			return c.Status(400).JSON(fiber.Map{"error": "sd_id length must match ipi_name length"})
+		}
+		if len(body.SuID) != 0 && len(body.SuID) != n {
+			return c.Status(400).JSON(fiber.Map{"error": "su_id length must match ipi_name length"})
+		}
+		if len(body.IpidLineCode) != 0 && len(body.IpidLineCode) != n {
+			return c.Status(400).JSON(fiber.Map{"error": "ipid_line_code length must match ipi_name length"})
+		}
 	}
 
 	tx, err := db.Beginx()
@@ -1115,6 +1150,17 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 	}()
 
 	now := time.Now()
+
+	if n == 0 {
+		if _, err := tx.Exec(`UPDATE info_project SET ip_status = ?, ip_updated_at = ?, ip_updated_by = ? WHERE ip_id = ?`, "draft", now, body.CreatedBy, body.IpID); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		if err := tx.Commit(); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.Status(201).JSON(1)
+	}
 
 	// Support ipid_start_date / ipid_end_date as 0, 1 or N values (N == len(ipi_name)).
 	if !(len(body.IpidStartDate) == 0 || len(body.IpidStartDate) == 1 || len(body.IpidStartDate) == n) {

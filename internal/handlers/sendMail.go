@@ -122,6 +122,93 @@ func SendMail(to []string, subject, body, contentType string) error {
 	return nil
 }
 
+// SendMailWithCC sends an email with optional CC recipients.
+func SendMailWithCC(to []string, cc []string, subject, body, contentType string) error {
+	_ = godotenv.Load(".env")
+	host := strings.TrimSpace(os.Getenv("SMTP_HOST"))
+	port := strings.TrimSpace(os.Getenv("SMTP_PORT"))
+	user := strings.TrimSpace(os.Getenv("SMTP_USER"))
+	pass := os.Getenv("SMTP_PASS")
+	from := strings.TrimSpace(os.Getenv("SMTP_FROM"))
+
+	if from == "" {
+		from = user
+	}
+	if contentType == "" {
+		contentType = "text/plain; charset=utf-8"
+	}
+
+	if host == "" || port == "" || user == "" || pass == "" {
+		return fmt.Errorf("smtp configuration incomplete: host=%q port=%q user=%q from=%q", host, port, user, from)
+	}
+
+	addr := host + ":" + port
+	hdr := make(map[string]string)
+	hdr["From"] = from
+	hdr["To"] = strings.Join(to, ", ")
+	if len(cc) > 0 {
+		hdr["Cc"] = strings.Join(cc, ", ")
+	}
+	hdr["Subject"] = subject
+	hdr["MIME-Version"] = "1.0"
+	hdr["Content-Type"] = contentType
+
+	var msg strings.Builder
+	for k, v := range hdr {
+		msg.WriteString(k + ": " + v + "\r\n")
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to dial smtp server: %w", err)
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return fmt.Errorf("failed to create smtp client: %w", err)
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		tlsCfg := &tls.Config{ServerName: host}
+		if err := client.StartTLS(tlsCfg); err != nil {
+			return fmt.Errorf("starttls failed: %w", err)
+		}
+	}
+
+	auth := utils.LoginAuth(user, pass, host)
+	if err := client.Auth(auth); err != nil {
+		return fmt.Errorf("authentication failed: %w", err)
+	}
+
+	if err := client.Mail(from); err != nil {
+		return fmt.Errorf("MAIL FROM failed: %w", err)
+	}
+	allRcpt := append(to, cc...)
+	for _, rcpt := range allRcpt {
+		if err := client.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("RCPT TO %s failed: %w", rcpt, err)
+		}
+	}
+
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("DATA command failed: %w", err)
+	}
+	if _, err := w.Write([]byte(msg.String())); err != nil {
+		return fmt.Errorf("writing message failed: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("closing DATA writer failed: %w", err)
+	}
+
+	if err := client.Quit(); err != nil {
+		log.Printf("warning: QUIT returned error: %v", err)
+	}
+	return nil
+}
+
 // SendMailWithAttachment sends an email with a single attachment (xlsx or other binary).
 func SendMailWithAttachment(to []string, subject, body, contentType, attachmentName string, attachmentData []byte) error {
 	_ = godotenv.Load(".env")

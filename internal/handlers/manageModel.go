@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 
 	"apiTrackingSystem/internal/utils"
@@ -28,29 +30,34 @@ type SysModelMaster struct {
 func ListModelMaster(c *fiber.Ctx, db *sqlx.DB) error {
 	status := c.Query("mmm_status")
 	query := `SELECT
-				mmm.mmm_id AS mmm_id,
-				mmm.mmm_model AS mmm_model,
-				mmm.mmm_customer_name AS mmm_customer_name,
-				GROUP_CONCAT(DISTINCT mpi.mpi_name ORDER BY mpi.mpi_name SEPARATOR ', ') AS aname,
-				mceAgg.mce_names AS mce_name,
-				mmm.mmm_status AS mmm_status,
-				mmm.mmm_updated_at AS mmm_updated_at,
-				mmm.mmm_updated_by AS mmm_updated_by,
-				su.su_firstname AS mmm_updated_by_firstname,
-				su.su_lastname AS mmm_updated_by_lastname
+					mmm.mmm_id AS mmm_id,
+					mmm.mmm_model AS mmm_model,
+					mmm.mmm_customer_name AS mmm_customer_name,
+					GROUP_CONCAT(DISTINCT mpi.mpi_name ORDER BY mpi.mpi_name SEPARATOR ', ') AS aname,
+					mceAgg.mce_names AS mce_name,
+					mmm.mmm_status AS mmm_status,
+					mmm.mmm_updated_at AS mmm_updated_at,
+					mmm.mmm_updated_by AS mmm_updated_by,
+					su.su_firstname AS mmm_updated_by_firstname,
+					su.su_lastname AS mmm_updated_by_lastname
 				FROM mst_model_master mmm
+
 				LEFT JOIN sys_user su
 				ON mmm.mmm_updated_by = su.su_emp_code
+
 				LEFT JOIN mst_ppap_detail mpd
 				ON mmm.mmm_id = mpd.mmm_id
+				AND mpd.mpd_status = 'active'
+
 				LEFT JOIN mst_ppap_item mpi
 				ON mpd.mpi_id = mpi.mpi_id
+
 				LEFT JOIN (
-				SELECT
-					mmm_id,
-					GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_name SEPARATOR ', ') AS mce_names
-				FROM mst_customer_event
-				GROUP BY mmm_id
+					SELECT
+						mmm_id,
+						GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_name SEPARATOR ', ') AS mce_names
+					FROM mst_customer_event
+					GROUP BY mmm_id
 				) mceAgg
 				ON mmm.mmm_id = mceAgg.mmm_id
 			WHERE 1=1
@@ -60,7 +67,7 @@ func ListModelMaster(c *fiber.Ctx, db *sqlx.DB) error {
 		query += " AND mmm_status = ?"
 		args = append(args, status)
 	}
-	query += " AND mpd.mpd_status = 'active' GROUP BY mmm.mmm_id,mmm.mmm_model,mmm.mmm_customer_name,mceAgg.mce_names ORDER BY mmm.mmm_id ASC"
+	query += " GROUP BY mmm.mmm_id,mmm.mmm_model,mmm.mmm_customer_name,mceAgg.mce_names ORDER BY mmm.mmm_id ASC"
 
 	var list []SysModelMaster
 	if err := db.Select(&list, query, args...); err != nil {
@@ -84,13 +91,21 @@ func GetModelMaster(c *fiber.Ctx, db *sqlx.DB) error {
 
 func InsertModelMaster(c *fiber.Ctx, db *sqlx.DB) error {
 	var body struct {
-		Model        string  `json:"mmm_model"`
-		CustomerName string  `json:"mmm_customer_name"`
-		PpapID       []int64 `json:"mpd_id"`
-		CreatedBy    string  `json:"mmm_created_by"`
+		Model        string          `json:"mmm_model"`
+		CustomerName string          `json:"mmm_customer_name"`
+		PpapID       json.RawMessage `json:"mpd_id"`
+		CreatedBy    string          `json:"mmm_created_by"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid request", "detail": err.Error()})
+	}
+
+	ppapIsNull := strings.TrimSpace(string(body.PpapID)) == "null"
+	var ppapIDs []int64
+	if len(body.PpapID) > 0 && !ppapIsNull {
+		if err := json.Unmarshal(body.PpapID, &ppapIDs); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid mpd_id", "detail": err.Error()})
+		}
 	}
 
 	// duplicate check (model + customer)
@@ -120,9 +135,14 @@ func InsertModelMaster(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(500).JSON(5)
 	}
 
-	if len(body.PpapID) > 0 {
-		stmt := `INSERT INTO mst_ppap_detail (mmm_id, mpi_id, mpd_created_at, mpd_created_by, mpd_updated_at, mpd_updated_by, mpd_status) VALUES (?, ?, ?, ?, ?, ?, 'active')`
-		for _, mpiID := range body.PpapID {
+	stmt := `INSERT INTO mst_ppap_detail (mmm_id, mpi_id, mpd_created_at, mpd_created_by, mpd_updated_at, mpd_updated_by, mpd_status) VALUES (?, ?, ?, ?, ?, ?, 'active')`
+	if ppapIsNull {
+		if _, err := tx.Exec(stmt, mmmID, nil, now, body.CreatedBy, now, body.CreatedBy); err != nil {
+			tx.Rollback()
+			return c.Status(500).JSON(5)
+		}
+	} else if len(ppapIDs) > 0 {
+		for _, mpiID := range ppapIDs {
 			if _, err := tx.Exec(stmt, mmmID, mpiID, now, body.CreatedBy, now, body.CreatedBy); err != nil {
 				tx.Rollback()
 				return c.Status(500).JSON(5)
