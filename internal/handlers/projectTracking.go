@@ -102,7 +102,7 @@ func ListProjectItemDetails(c *fiber.Ctx, db *sqlx.DB) error {
 				LEFT JOIN info_ppap_item pp
 					ON d.ipid_type = 'ppap'
 				AND d.ref_id    = pp.ipi_id
-				WHERE d.su_id = ?
+				WHERE d.su_id = ? AND (d.ipid_status_flg = 'sendbyphase' OR d.ipid_status_flg = 'sendandsubmit')
 			) x
 			JOIN info_project p
 				ON p.ip_id = x.ip_id
@@ -124,7 +124,7 @@ func ListProjectItemDetails(c *fiber.Ctx, db *sqlx.DB) error {
 			args = append(args, ipStatusParam)
 		}
 	}
-	query += `WHERE p.ip_status = 'inprogress' OR dd.ipid_status = 'inprogress' OR dd.ipid_status = 'delay'`
+	query += `WHERE p.ip_status = 'inprogress' OR dd.ipid_status = 'inprogress' OR dd.ipid_status = 'delay' OR dd.ipid_status = 'waiting' OR dd.ipid_status = 'reject'`
 	query += `GROUP BY
 				p.ip_id, p.ip_code, p.ip_model, p.ip_part_no, p.ip_status,
 				p.ip_created_by, p.ip_created_at, su.su_firstname, su.su_lastname
@@ -157,8 +157,8 @@ func CountProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 				JOIN info_project ip
 					ON ip.ip_id = ipi.ip_id
 				WHERE ipid.su_id = ?
-					AND ip.ip_status = 'inprogress'
-					OR ipid.ipid_status = 'inprogress'
+					AND (ipid.ipid_status = 'inprogress' OR ipid.ipid_status = 'delay' OR ipid.ipid_status = 'reject')
+					AND ipid.ipid_status_flg IS NOT NULL
 					AND ipid.ipid_type = 'ppap'
 
 				UNION
@@ -171,8 +171,8 @@ func CountProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 				JOIN info_project ip
 					ON ip.ip_id = iai.ip_id
 				WHERE ipid.su_id = ?
-					AND ip.ip_status = 'inprogress'
-					OR ipid.ipid_status = 'inprogress'
+					AND (ipid.ipid_status = 'inprogress' OR ipid.ipid_status = 'delay' OR ipid.ipid_status = 'reject')
+					AND ipid.ipid_status_flg IS NOT NULL
 					AND ipid.ipid_type = 'apqp'
 				) t;
 
@@ -228,9 +228,10 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					x.end_date,
 					ia.ia_note,
 					CASE
-						WHEN x.ipid_status = 'delay' THEN 9
+						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND x.ipid_status = 'delay' THEN 9
 						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND x.ipid_status = 'done' AND tf.itf_file_path IS NOT NULL THEN 8
-						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND tf.itf_file_path IS NOT NULL THEN 7
+						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND x.ipid_status = 'waiting' AND tf.itf_file_path IS NOT NULL THEN 7
+						WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL AND x.ipid_status = 'inprogress' AND tf.itf_file_path IS NOT NULL THEN 0
                         WHEN ia.ia_status IS NULL AND ia.ia_type IS NULL THEN 0
                         WHEN ia.ia_status = 'waiting' AND x.ipid_status = 'waiting' AND ia.ia_type = 'Leader' THEN 1
                         WHEN ia.ia_status = 'Approve' AND x.ipid_status = 'waiting' AND ia.ia_type = 'Leader' THEN 2
@@ -240,8 +241,23 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 						WHEN ia.ia_status = 'waiting' AND ia.ia_type = 'PJ' THEN 6
                         ELSE NULL
                     END AS status_approve,
-					tf.itf_file_name,
-					tf.itf_file_path
+					CASE
+                        WHEN ia.ia_status IS NULL 
+                             AND ia.ia_type IS NULL 
+                             AND x.ipid_status = 'inprogress'
+                             AND tf.itf_file_path IS NOT NULL
+                        THEN NULL
+                        ELSE tf.itf_file_name
+                    END AS itf_file_name,
+                    
+                    CASE
+                        WHEN ia.ia_status IS NULL 
+                             AND ia.ia_type IS NULL 
+                             AND x.ipid_status = 'inprogress'
+                             AND tf.itf_file_path IS NOT NULL
+                        THEN NULL
+                        ELSE tf.itf_file_path
+                    END AS itf_file_path
 				
 				FROM
 				(
@@ -257,6 +273,7 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					pid.ipid_end_date AS end_date,
 					pid.ipid_id AS ipid_id,
 					pid.ipid_status AS ipid_status,
+					pid.ipid_status_flg AS ipid_status_flg,
 					NULL AS itf_file_name,
 					NULL AS itf_file_path  
 					FROM
@@ -295,6 +312,7 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					pid.ipid_end_date AS end_date,
 					pid.ipid_id AS ipid_id,
 					pid.ipid_status AS ipid_status,
+					pid.ipid_status_flg AS ipid_status_flg,
 					NULL AS itf_file_name,
 					NULL AS itf_file_path  
 					FROM
@@ -320,20 +338,18 @@ func GetListProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 				) x
 
 				
-				LEFT JOIN info_tracking_file tf
-					ON tf.ipid_id = (
-						SELECT tf_sub.ipid_id
-						FROM info_tracking_file tf_sub
-						JOIN info_project_item_detail pid_sub 
-							ON pid_sub.ipid_id = tf_sub.ipid_id
-						WHERE pid_sub.ref_id = x.ref_id
-						
-						AND pid_sub.ipid_type = x.item_type
-						LIMIT 1
-					)
+				LEFT JOIN info_tracking_file tf 
+				    ON tf.ipid_id = ( SELECT tf_sub.ipid_id 
+    				                    FROM info_tracking_file tf_sub 
+				                        JOIN info_project_item_detail pid_sub 
+				                            ON pid_sub.ipid_id = tf_sub.ipid_id 
+				                        WHERE pid_sub.ref_id = x.ref_id AND pid_sub.sd_id = x.sd_id
+				                                AND pid_sub.ipid_type = x.item_type 
+				LIMIT 1 )
 
-					LEFT JOIN sys_user su ON su.su_id = x.owner_su_id
-					LEFT JOIN info_approval ia ON ia.ipid_id = x.ipid_id AND ia.ia_is_action = 1
+				LEFT JOIN sys_user su ON su.su_id = x.owner_su_id
+				LEFT JOIN info_approval ia ON ia.ipid_id = x.ipid_id AND ia.ia_is_action = 1
+				WHERE x.ipid_status_flg IS NOT NULL
 				ORDER BY
 				x.item_type ASC,
 				x.start_date ASC,
@@ -540,7 +556,7 @@ func InsertProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 		// prepare upload base (server absolute path) from ENV with fallback
 		uploadBase := os.Getenv("UPLOAD_BASE")
 		if strings.TrimSpace(uploadBase) == "" {
-			uploadBase = `C:\inetpub\wwwroot\apiTrackingSystemUat\uploads`
+			uploadBase = `C:\inetpub\wwwroot\apiTrackingSystem\uploads`
 		}
 		// cache for ip_id -> folder name
 		ipCodeCache := map[int64]string{}
@@ -633,7 +649,7 @@ func InsertProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 	now := time.Now()
 	insertStmt := `INSERT INTO info_tracking_file (itf_file_name, itf_file_path, ip_id, ipid_id, itf_type, itf_created_at, itf_created_by, itf_updated_at, itf_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	updateTrackingStmt := `UPDATE info_tracking_file SET itf_file_name = ?, itf_file_path = ?, itf_type = ?, itf_updated_at = ?, itf_updated_by = ? WHERE itf_id = ?`
-	updateStmt := `UPDATE info_project_item_detail SET ipid_status = ? WHERE (ref_id, ipid_type) IN (SELECT ref_id, ipid_type FROM (SELECT ref_id, ipid_type FROM info_project_item_detail WHERE ipid_id = ?) AS sq)`
+	updateStmt := `UPDATE info_project_item_detail SET ipid_status = ? WHERE (ref_id, ipid_type, sd_id) IN (SELECT ref_id, ipid_type, sd_id FROM (SELECT ref_id, ipid_type, sd_id FROM info_project_item_detail WHERE ipid_id = ?) AS sq)`
 
 	// Track newly inserted items to send emails only for new items
 	newItemIpidIDs := map[int64]bool{}
@@ -930,7 +946,7 @@ func InsertProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 			sb.WriteString("</tbody></table>")
 
 			sb.WriteString("<div style='margin-top:20px;'>")
-			sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
+			sb.WriteString("<a href='http://192.168.161.205:4009/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
 			sb.WriteString("</div>")
 
 			sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")

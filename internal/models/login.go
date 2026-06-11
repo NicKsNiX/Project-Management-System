@@ -37,6 +37,7 @@ type ExternalUser struct {
 
 // ExternalLoginResponse is the top-level response from the external auth service
 type ExternalLoginResponse struct {
+	Status  string       `json:"status"`
 	Message string       `json:"message"`
 	User    ExternalUser `json:"user"`
 }

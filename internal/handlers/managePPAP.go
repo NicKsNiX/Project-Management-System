@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html"
 	"log"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -252,10 +251,9 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 	if body.CreatedBy == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "created_by is required"})
 	}
-	// arrays must align with ipi_name length when PPAP items are provided
+
 	n := len(body.IpiName)
 	if n > 0 {
-		// sd_id is derived from su_id (sys_user.sd_id). frontend should not send sd_id.
 		if len(body.SuID) != 0 && len(body.SuID) != n {
 			return c.Status(400).JSON(fiber.Map{"error": "su_id length must match ipi_name length"})
 		}
@@ -274,68 +272,6 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 
 	now := time.Now()
 
-	if n == 0 {
-		if _, err := tx.Exec(`UPDATE info_project SET ip_status = ?, ip_updated_at = ?, ip_updated_by = ? WHERE ip_id = ?`, "inprogress", now, body.CreatedBy, body.IpID); err != nil {
-			return c.Status(500).JSON(5)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return c.Status(500).JSON(5)
-		}
-
-		return c.Status(201).JSON(1)
-	}
-
-	// Support ipid_start_date / ipid_end_date as 0, 1 or N values (N == len(ipi_name)).
-	if !(len(body.IpidStartDate) == 0 || len(body.IpidStartDate) == 1 || len(body.IpidStartDate) == n) {
-		return c.Status(400).JSON(fiber.Map{"error": "ipid_start_date must be empty, single value, or array matching ipi_name length"})
-	}
-	if !(len(body.IpidEndDate) == 0 || len(body.IpidEndDate) == 1 || len(body.IpidEndDate) == n) {
-		return c.Status(400).JSON(fiber.Map{"error": "ipid_end_date must be empty, single value, or array matching ipi_name length"})
-	}
-
-	// pre-parse per-row dates into slices of *time.Time for easy comparison later
-	parsedStarts := make([]*time.Time, n)
-	parsedEnds := make([]*time.Time, n)
-	for i := 0; i < n; i++ {
-		// start
-		var s string
-		if len(body.IpidStartDate) == 1 {
-			s = body.IpidStartDate[0]
-		} else if len(body.IpidStartDate) == n {
-			s = body.IpidStartDate[i]
-		}
-		s = strings.TrimSpace(s)
-		if s != "" && !strings.EqualFold(s, "null") {
-			if t, err := time.Parse("2006-01-02", s); err == nil {
-				parsedStarts[i] = &t
-			} else if t, err := time.Parse(time.RFC3339, s); err == nil {
-				parsedStarts[i] = &t
-			} else {
-				return c.Status(400).JSON(fiber.Map{"error": "invalid ipid_start_date format"})
-			}
-		}
-
-		// end
-		var e string
-		if len(body.IpidEndDate) == 1 {
-			e = body.IpidEndDate[0]
-		} else if len(body.IpidEndDate) == n {
-			e = body.IpidEndDate[i]
-		}
-		e = strings.TrimSpace(e)
-		if e != "" && !strings.EqualFold(e, "null") {
-			if t, err := time.Parse("2006-01-02", e); err == nil {
-				parsedEnds[i] = &t
-			} else if t, err := time.Parse(time.RFC3339, e); err == nil {
-				parsedEnds[i] = &t
-			} else {
-				return c.Status(400).JSON(fiber.Map{"error": "invalid ipid_end_date format"})
-			}
-		}
-	}
-
-	// helper: parse CSV string into ints
 	parseCSVInts := func(s string) []int64 {
 		s = strings.TrimSpace(s)
 		if s == "" || s == "null" {
@@ -371,244 +307,397 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 		return out
 	}
 
-	// results to return: per index, the ipi_id and created ipid_id
+	type existingPPAPDetail struct {
+		IpidID    int64          `db:"ipid_id"`
+		Start     sql.NullTime   `db:"ipid_start_date"`
+		End       sql.NullTime   `db:"ipid_end_date"`
+		StatusFlg sql.NullString `db:"ipid_status_flg"`
+	}
+
+	shouldUpdateExistingPPAPDetail := func(existing existingPPAPDetail, parsedStart, parsedEnd *time.Time) bool {
+		if existing.StatusFlg.Valid && existing.StatusFlg.String == "sendbyphase" {
+			return false
+		}
+		needUpdate := false
+		if parsedStart == nil && existing.Start.Valid {
+			needUpdate = true
+		}
+		if parsedStart != nil && (!existing.Start.Valid || !existing.Start.Time.Equal(*parsedStart)) {
+			needUpdate = true
+		}
+		if !needUpdate {
+			if parsedEnd == nil && existing.End.Valid {
+				needUpdate = true
+			}
+			if parsedEnd != nil && (!existing.End.Valid || !existing.End.Time.Equal(*parsedEnd)) {
+				needUpdate = true
+			}
+		}
+		if !needUpdate && (!existing.StatusFlg.Valid || existing.StatusFlg.String != "sendandsubmit") {
+			needUpdate = true
+		}
+		return needUpdate
+	}
+
+	updateExistingPPAPDetail := func(ipidID int64, startDate, endDate interface{}) error {
+		_, err := tx.Exec(`UPDATE info_project_item_detail SET
+			ipid_start_date = ?,
+			ipid_end_date = ?,
+			ipid_updated_at = ?,
+			ipid_updated_by = ?,
+			ipid_status_flg = CASE
+				WHEN ipid_status_flg = 'sendbyphase' THEN ipid_status_flg
+				ELSE 'sendandsubmit'
+			END
+		WHERE ipid_id = ?`, startDate, endDate, now, body.CreatedBy, ipidID)
+		return err
+	}
+
+	insertPPAPDetail := func(refID int64, sd, su, line, startDate, endDate interface{}) (int64, error) {
+		res, err := tx.Exec(`INSERT INTO info_project_item_detail
+			(ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			refID, sd, su, line, "ppap", startDate, endDate, "inprogress", "sendandsubmit", now, body.CreatedBy, now, body.CreatedBy,
+		)
+		if err != nil {
+			return 0, err
+		}
+		id, _ := res.LastInsertId()
+		return id, nil
+	}
+
 	var results []map[string]int64
 
-	for i := 0; i < n; i++ {
-		name := strings.TrimSpace(body.IpiName[i])
-		if name == "" {
-			return c.Status(400).JSON(fiber.Map{"error": "ipi_name values must not be empty"})
+	if n > 0 {
+		if !(len(body.IpidStartDate) == 0 || len(body.IpidStartDate) == 1 || len(body.IpidStartDate) == n) {
+			return c.Status(400).JSON(fiber.Map{"error": "ipid_start_date must be empty, single value, or array matching ipi_name length"})
+		}
+		if !(len(body.IpidEndDate) == 0 || len(body.IpidEndDate) == 1 || len(body.IpidEndDate) == n) {
+			return c.Status(400).JSON(fiber.Map{"error": "ipid_end_date must be empty, single value, or array matching ipi_name length"})
 		}
 
-		// per-row parsed dates and interface values used for SQL params
-		parsedStart := parsedStarts[i]
-		parsedEnd := parsedEnds[i]
-		var startDate interface{} = nil
-		var endDate interface{} = nil
-		if parsedStart != nil {
-			startDate = *parsedStart
-		}
-		if parsedEnd != nil {
-			endDate = *parsedEnd
+		parsedStarts := make([]*time.Time, n)
+		parsedEnds := make([]*time.Time, n)
+
+		for i := 0; i < n; i++ {
+			var s string
+			if len(body.IpidStartDate) == 1 {
+				s = body.IpidStartDate[0]
+			} else if len(body.IpidStartDate) == n {
+				s = body.IpidStartDate[i]
+			}
+			s = strings.TrimSpace(s)
+			if s != "" && !strings.EqualFold(s, "null") {
+				if t, err := time.Parse("2006-01-02", s); err == nil {
+					parsedStarts[i] = &t
+				} else if t, err := time.Parse(time.RFC3339, s); err == nil {
+					parsedStarts[i] = &t
+				} else {
+					return c.Status(400).JSON(fiber.Map{"error": "invalid ipid_start_date format"})
+				}
+			}
+
+			var e string
+			if len(body.IpidEndDate) == 1 {
+				e = body.IpidEndDate[0]
+			} else if len(body.IpidEndDate) == n {
+				e = body.IpidEndDate[i]
+			}
+			e = strings.TrimSpace(e)
+			if e != "" && !strings.EqualFold(e, "null") {
+				if t, err := time.Parse("2006-01-02", e); err == nil {
+					parsedEnds[i] = &t
+				} else if t, err := time.Parse(time.RFC3339, e); err == nil {
+					parsedEnds[i] = &t
+				} else {
+					return c.Status(400).JSON(fiber.Map{"error": "invalid ipid_end_date format"})
+				}
+			}
 		}
 
-		var ipiID int64
-		// check existing ipi for same ip_id and name
-		err = tx.Get(&ipiID, `SELECT ipi_id FROM info_ppap_item WHERE ip_id = ? AND ipi_name = ?`, body.IpID, name)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				res, err := tx.Exec(`INSERT INTO info_ppap_item (ip_id, ipi_name, ipi_created_at, ipi_created_by) VALUES (?, ?, ?, ?)`, body.IpID, name, now, body.CreatedBy)
-				if err != nil {
+		for i := 0; i < n; i++ {
+			name := strings.TrimSpace(body.IpiName[i])
+			if name == "" {
+				return c.Status(400).JSON(fiber.Map{"error": "ipi_name values must not be empty"})
+			}
+
+			parsedStart := parsedStarts[i]
+			parsedEnd := parsedEnds[i]
+			var startDate interface{} = nil
+			var endDate interface{} = nil
+			if parsedStart != nil {
+				startDate = *parsedStart
+			}
+			if parsedEnd != nil {
+				endDate = *parsedEnd
+			}
+
+			var ipiID int64
+			err = tx.Get(&ipiID, `SELECT ipi_id FROM info_ppap_item WHERE ip_id = ? AND ipi_name = ?`, body.IpID, name)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					res, err := tx.Exec(`INSERT INTO info_ppap_item (ip_id, ipi_name, ipi_created_at, ipi_created_by) VALUES (?, ?, ?, ?)`, body.IpID, name, now, body.CreatedBy)
+					if err != nil {
+						return c.Status(500).JSON(5)
+					}
+					id, _ := res.LastInsertId()
+					ipiID = id
+				} else {
 					return c.Status(500).JSON(5)
 				}
-				id, _ := res.LastInsertId()
-				ipiID = id
-			} else {
-				return c.Status(500).JSON(5)
 			}
-		}
 
-		// su mapping: per-row or global
-		suPerRow := len(body.SuID) == n
-		globalSu := []int64{}
-		if len(body.SuID) == 1 {
-			globalSu = parseCSVInts(body.SuID[0])
-		}
-		suList := []int64{}
-		if suPerRow {
-			suList = parseCSVInts(body.SuID[i])
-		}
-
-		// build sdList derived from su_id (do not accept sd_id from frontend)
-		sdList := []int64{}
-		// derive from per-row suList
-		if suPerRow && len(suList) > 0 {
-			for _, su := range suList {
-				var sd sql.NullInt64
-				if err := tx.Get(&sd, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, su); err != nil {
-					if err == sql.ErrNoRows {
-						// su exists but no sd mapping; treat as no sd for that su
-						continue
-					}
-					return c.Status(500).JSON(fiber.Map{"error": "failed to fetch sd_id for su_id", "detail": err.Error()})
-				}
-				if sd.Valid && sd.Int64 != 0 {
-					sdList = append(sdList, sd.Int64)
-				}
+			suPerRow := len(body.SuID) == n
+			globalSu := []int64{}
+			if len(body.SuID) == 1 {
+				globalSu = parseCSVInts(body.SuID[0])
 			}
-		} else if len(globalSu) > 0 {
-			for _, su := range globalSu {
-				var sd sql.NullInt64
-				if err := tx.Get(&sd, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, su); err != nil {
-					if err == sql.ErrNoRows {
-						continue
-					}
-					return c.Status(500).JSON(fiber.Map{"error": "failed to fetch sd_id for su_id", "detail": err.Error()})
-				}
-				if sd.Valid && sd.Int64 != 0 {
-					sdList = append(sdList, sd.Int64)
-				}
+			suList := []int64{}
+			if suPerRow {
+				suList = parseCSVInts(body.SuID[i])
 			}
-		}
 
-		// line code mapping
-		linePerRow := len(body.IpidLineCode) == n
-		globalLine := []string{}
-		if len(body.IpidLineCode) == 1 {
-			globalLine = parseCSVStrings(body.IpidLineCode[0])
-		}
-		lineList := []string{}
-		if linePerRow {
-			lineList = parseCSVStrings(body.IpidLineCode[i])
-		}
-
-		// If no sdList but suList/globalSu provided, create rows with sd NULL
-		if len(sdList) == 0 {
-			// Use suPerRow -> insert for each su token, else if globalSu exists use globalSu tokens
+			sdList := []int64{}
 			if suPerRow && len(suList) > 0 {
 				for _, su := range suList {
-					// line mapping: use first of lineList/globalLine or nil
-					var lineVal interface{} = nil
-					if len(lineList) == 1 {
+					var sd sql.NullInt64
+					if err := tx.Get(&sd, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, su); err != nil {
+						if err == sql.ErrNoRows {
+							continue
+						}
+						return c.Status(500).JSON(fiber.Map{"error": "failed to fetch sd_id for su_id", "detail": err.Error()})
+					}
+					if sd.Valid && sd.Int64 != 0 {
+						sdList = append(sdList, sd.Int64)
+					}
+				}
+			} else if len(globalSu) > 0 {
+				for _, su := range globalSu {
+					var sd sql.NullInt64
+					if err := tx.Get(&sd, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, su); err != nil {
+						if err == sql.ErrNoRows {
+							continue
+						}
+						return c.Status(500).JSON(fiber.Map{"error": "failed to fetch sd_id for su_id", "detail": err.Error()})
+					}
+					if sd.Valid && sd.Int64 != 0 {
+						sdList = append(sdList, sd.Int64)
+					}
+				}
+			}
+
+			linePerRow := len(body.IpidLineCode) == n
+			globalLine := []string{}
+			if len(body.IpidLineCode) == 1 {
+				globalLine = parseCSVStrings(body.IpidLineCode[0])
+			}
+			lineList := []string{}
+			if linePerRow {
+				lineList = parseCSVStrings(body.IpidLineCode[i])
+			}
+
+			if len(sdList) == 0 {
+				if suPerRow && len(suList) > 0 {
+					for _, su := range suList {
+						var lineVal interface{} = nil
+						if len(lineList) == 1 {
+							if v, err := strconv.ParseInt(lineList[0], 10, 64); err == nil {
+								lineVal = v
+							}
+						} else if len(globalLine) == 1 {
+							if v, err := strconv.ParseInt(globalLine[0], 10, 64); err == nil {
+								lineVal = v
+							}
+						}
+
+						var existing existingPPAPDetail
+						sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND sd_id IS NULL AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
+						err = tx.Get(&existing, sel, ipiID, su, su, lineVal, lineVal)
+
+						var ipidID int64
+						if err == nil {
+							needUpdate := shouldUpdateExistingPPAPDetail(existing, parsedStart, parsedEnd)
+							ipidID = existing.IpidID
+							if needUpdate {
+								if err := updateExistingPPAPDetail(ipidID, startDate, endDate); err != nil {
+									return c.Status(500).JSON(5)
+								}
+							}
+						} else {
+							if err != sql.ErrNoRows {
+								return c.Status(500).JSON(5)
+							}
+							ipidID, err = insertPPAPDetail(ipiID, nil, su, lineVal, startDate, endDate)
+							if err != nil {
+								return c.Status(500).JSON(5)
+							}
+						}
+						results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
+					}
+					continue
+				}
+
+				if len(globalSu) > 0 {
+					for _, su := range globalSu {
+						var lineVal interface{} = nil
+						if len(globalLine) == 1 {
+							if v, err := strconv.ParseInt(globalLine[0], 10, 64); err == nil {
+								lineVal = v
+							}
+						}
+
+						var existing existingPPAPDetail
+						sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND sd_id IS NULL AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
+						err = tx.Get(&existing, sel, ipiID, su, su, lineVal, lineVal)
+
+						var ipidID int64
+						if err == nil {
+							needUpdate := shouldUpdateExistingPPAPDetail(existing, parsedStart, parsedEnd)
+							ipidID = existing.IpidID
+							if needUpdate {
+								if err := updateExistingPPAPDetail(ipidID, startDate, endDate); err != nil {
+									return c.Status(500).JSON(5)
+								}
+							}
+						} else {
+							if err != sql.ErrNoRows {
+								return c.Status(500).JSON(5)
+							}
+							ipidID, err = insertPPAPDetail(ipiID, nil, su, lineVal, startDate, endDate)
+							if err != nil {
+								return c.Status(500).JSON(5)
+							}
+						}
+						results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
+					}
+					continue
+				}
+
+				{
+					var existing existingPPAPDetail
+					sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND sd_id IS NULL AND su_id IS NULL AND ipid_line_code IS NULL AND ipid_type = 'ppap' LIMIT 1`
+					err = tx.Get(&existing, sel, ipiID)
+
+					var ipidID int64
+					if err == nil {
+						needUpdate := shouldUpdateExistingPPAPDetail(existing, parsedStart, parsedEnd)
+						ipidID = existing.IpidID
+						if needUpdate {
+							if err := updateExistingPPAPDetail(ipidID, startDate, endDate); err != nil {
+								return c.Status(500).JSON(5)
+							}
+						}
+					} else {
+						if err != sql.ErrNoRows {
+							return c.Status(500).JSON(5)
+						}
+						ipidID, err = insertPPAPDetail(ipiID, nil, nil, nil, startDate, endDate)
+						if err != nil {
+							return c.Status(500).JSON(5)
+						}
+					}
+					results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
+					continue
+				}
+			}
+
+			for idx, sd := range sdList {
+				var suVal interface{} = nil
+				if suPerRow {
+					if len(suList) == len(sdList) && idx < len(suList) {
+						suVal = suList[idx]
+					} else if len(suList) > 0 {
+						suVal = suList[0]
+					}
+				} else if len(globalSu) > 0 {
+					suVal = globalSu[0]
+				}
+
+				var lineVal interface{} = nil
+				if linePerRow {
+					if len(lineList) == len(sdList) && idx < len(lineList) {
+						if v, err := strconv.ParseInt(lineList[idx], 10, 64); err == nil {
+							lineVal = v
+						}
+					} else if len(lineList) > 0 {
 						if v, err := strconv.ParseInt(lineList[0], 10, 64); err == nil {
 							lineVal = v
 						}
-					} else if len(globalLine) == 1 {
-						if v, err := strconv.ParseInt(globalLine[0], 10, 64); err == nil {
-							lineVal = v
-						}
 					}
-					// upsert detail for (ref_id, sd=NULL, su, lineVal)
-					var existing struct {
-						IpidID int64        `db:"ipid_id"`
-						Start  sql.NullTime `db:"ipid_start_date"`
-						End    sql.NullTime `db:"ipid_end_date"`
+				} else if len(globalLine) > 0 {
+					if v, err := strconv.ParseInt(globalLine[0], 10, 64); err == nil {
+						lineVal = v
 					}
-					sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND sd_id IS NULL AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
-					err = tx.Get(&existing, sel, ipiID, su, su, lineVal, lineVal)
-					var ipidID int64
-					if err == nil {
-						needUpdate := false
-						if parsedStart == nil && existing.Start.Valid {
-							needUpdate = true
-						}
-						if parsedStart != nil && (!existing.Start.Valid || !existing.Start.Time.Equal(*parsedStart)) {
-							needUpdate = true
-						}
-						if !needUpdate {
-							if parsedEnd == nil && existing.End.Valid {
-								needUpdate = true
-							}
-							if parsedEnd != nil && (!existing.End.Valid || !existing.End.Time.Equal(*parsedEnd)) {
-								needUpdate = true
-							}
-						}
-						ipidID = existing.IpidID
-						if needUpdate {
-							if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, startDate, endDate, now, body.CreatedBy, ipidID); err != nil {
-								return c.Status(500).JSON(5)
-							}
-						}
-					} else {
-						if err != sql.ErrNoRows {
-							return c.Status(500).JSON(5)
-						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
-						if err != nil {
-							return c.Status(500).JSON(5)
-						}
-						id, _ := res2.LastInsertId()
-						ipidID = id
-					}
-					results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
 				}
-				// done sd==NULL case for this row
-				continue
-			}
-			// if globalSu exists but sd empty, still create rows with NULL sd but no su assigned per your earlier logic -> skip here
-			if len(globalSu) > 0 {
-				for _, su := range globalSu {
-					var lineVal interface{} = nil
-					if len(globalLine) == 1 {
-						if v, err := strconv.ParseInt(globalLine[0], 10, 64); err == nil {
-							lineVal = v
-						}
-					}
-					var existing struct {
-						IpidID int64        `db:"ipid_id"`
-						Start  sql.NullTime `db:"ipid_start_date"`
-						End    sql.NullTime `db:"ipid_end_date"`
-					}
-					sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND sd_id IS NULL AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
-					err = tx.Get(&existing, sel, ipiID, su, su, lineVal, lineVal)
-					var ipidID int64
-					if err == nil {
-						needUpdate := false
-						if parsedStart == nil && existing.Start.Valid {
-							needUpdate = true
-						}
-						if parsedStart != nil && (!existing.Start.Valid || !existing.Start.Time.Equal(*parsedStart)) {
-							needUpdate = true
-						}
-						if !needUpdate {
-							if parsedEnd == nil && existing.End.Valid {
-								needUpdate = true
-							}
-							if parsedEnd != nil && (!existing.End.Valid || !existing.End.Time.Equal(*parsedEnd)) {
-								needUpdate = true
-							}
-						}
-						ipidID = existing.IpidID
-						if needUpdate {
-							if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, startDate, endDate, now, body.CreatedBy, ipidID); err != nil {
-								return c.Status(500).JSON(5)
-							}
-						}
-					} else {
-						if err != sql.ErrNoRows {
-							return c.Status(500).JSON(5)
-						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
-						if err != nil {
-							return c.Status(500).JSON(5)
-						}
-						id, _ := res2.LastInsertId()
-						ipidID = id
-					}
-					results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
-				}
-				continue
-			}
 
-			// fallback: create a single detail row with NULL sd, NULL su, NULL line
-			{
-				var existing struct {
-					IpidID int64        `db:"ipid_id"`
-					Start  sql.NullTime `db:"ipid_start_date"`
-					End    sql.NullTime `db:"ipid_end_date"`
+				if suPerRow && len(suList) > 1 && len(sdList) == 1 {
+					for _, su := range suList {
+						var existing existingPPAPDetail
+						sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
+						err = tx.Get(&existing, sel, ipiID, sd, sd, su, su, lineVal, lineVal)
+
+						var ipidID int64
+						if err == nil {
+							needUpdate := shouldUpdateExistingPPAPDetail(existing, parsedStart, parsedEnd)
+							ipidID = existing.IpidID
+							if needUpdate {
+								if err := updateExistingPPAPDetail(ipidID, startDate, endDate); err != nil {
+									return c.Status(500).JSON(5)
+								}
+							}
+						} else {
+							if err != sql.ErrNoRows {
+								return c.Status(500).JSON(5)
+							}
+							ipidID, err = insertPPAPDetail(ipiID, sd, su, lineVal, startDate, endDate)
+							if err != nil {
+								return c.Status(500).JSON(5)
+							}
+						}
+						results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
+					}
+					continue
 				}
-				sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND sd_id IS NULL AND su_id IS NULL AND ipid_line_code IS NULL AND ipid_type = 'ppap' LIMIT 1`
-				err = tx.Get(&existing, sel, ipiID)
+
+				if !suPerRow && len(globalSu) > 1 {
+					for _, su := range globalSu {
+						var existing existingPPAPDetail
+						sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
+						err = tx.Get(&existing, sel, ipiID, sd, sd, su, su, lineVal, lineVal)
+
+						var ipidID int64
+						if err == nil {
+							needUpdate := shouldUpdateExistingPPAPDetail(existing, parsedStart, parsedEnd)
+							ipidID = existing.IpidID
+							if needUpdate {
+								if err := updateExistingPPAPDetail(ipidID, startDate, endDate); err != nil {
+									return c.Status(500).JSON(5)
+								}
+							}
+						} else {
+							if err != sql.ErrNoRows {
+								return c.Status(500).JSON(5)
+							}
+							ipidID, err = insertPPAPDetail(ipiID, sd, su, lineVal, startDate, endDate)
+							if err != nil {
+								return c.Status(500).JSON(5)
+							}
+						}
+						results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
+					}
+					continue
+				}
+
+				var existing existingPPAPDetail
+				sel := `SELECT ipid_id, ipid_start_date, ipid_end_date, ipid_status_flg FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
+				err = tx.Get(&existing, sel, ipiID, sd, sd, suVal, suVal, lineVal, lineVal)
+
 				var ipidID int64
 				if err == nil {
-					needUpdate := false
-					if parsedStart == nil && existing.Start.Valid {
-						needUpdate = true
-					}
-					if parsedStart != nil && (!existing.Start.Valid || !existing.Start.Time.Equal(*parsedStart)) {
-						needUpdate = true
-					}
-					if !needUpdate {
-						if parsedEnd == nil && existing.End.Valid {
-							needUpdate = true
-						}
-						if parsedEnd != nil && (!existing.End.Valid || !existing.End.Time.Equal(*parsedEnd)) {
-							needUpdate = true
-						}
-					}
+					needUpdate := shouldUpdateExistingPPAPDetail(existing, parsedStart, parsedEnd)
 					ipidID = existing.IpidID
 					if needUpdate {
-						if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, startDate, endDate, now, body.CreatedBy, ipidID); err != nil {
+						if err := updateExistingPPAPDetail(ipidID, startDate, endDate); err != nil {
 							return c.Status(500).JSON(5)
 						}
 					}
@@ -616,199 +705,16 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 					if err != sql.ErrNoRows {
 						return c.Status(500).JSON(5)
 					}
-					res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
+					ipidID, err = insertPPAPDetail(ipiID, sd, suVal, lineVal, startDate, endDate)
 					if err != nil {
 						return c.Status(500).JSON(5)
 					}
-					id, _ := res2.LastInsertId()
-					ipidID = id
 				}
 				results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
-				continue
 			}
-		}
-
-		// otherwise iterate sdList and map su/line per rules
-		for idx, sd := range sdList {
-			// determine su for this sd
-			var suVal interface{} = nil
-			if suPerRow {
-				// if suList length equals sdList length, map by index
-				if len(suList) == len(sdList) && idx < len(suList) {
-					suVal = suList[idx]
-				} else if len(suList) > 0 {
-					// if suList has multiple tokens, expand into multiple inserts below
-					// we'll handle expansion: if suList length>1 and len(sdList)==1 we create multiple rows
-					suVal = suList[0]
-				}
-			} else if len(globalSu) > 0 {
-				// use first of globalSu as default mapping; if len>1 we'll expand below
-				suVal = globalSu[0]
-			}
-
-			// determine line for this sd
-			var lineVal interface{} = nil
-			if linePerRow {
-				if len(lineList) == len(sdList) && idx < len(lineList) {
-					if v, err := strconv.ParseInt(lineList[idx], 10, 64); err == nil {
-						lineVal = v
-					}
-				} else if len(lineList) > 0 {
-					if v, err := strconv.ParseInt(lineList[0], 10, 64); err == nil {
-						lineVal = v
-					}
-				}
-			} else if len(globalLine) > 0 {
-				if v, err := strconv.ParseInt(globalLine[0], 10, 64); err == nil {
-					lineVal = v
-				}
-			}
-
-			// If suList (per-row) has multiple tokens and only one sd, expand
-			if suPerRow && len(suList) > 1 && len(sdList) == 1 {
-				for _, su := range suList {
-					var existing struct {
-						IpidID int64        `db:"ipid_id"`
-						Start  sql.NullTime `db:"ipid_start_date"`
-						End    sql.NullTime `db:"ipid_end_date"`
-					}
-					sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
-					err = tx.Get(&existing, sel, ipiID, sd, sd, su, su, lineVal, lineVal)
-					var ipidID int64
-					if err == nil {
-						needUpdate := false
-						if parsedStart == nil && existing.Start.Valid {
-							needUpdate = true
-						}
-						if parsedStart != nil && (!existing.Start.Valid || !existing.Start.Time.Equal(*parsedStart)) {
-							needUpdate = true
-						}
-						if !needUpdate {
-							if parsedEnd == nil && existing.End.Valid {
-								needUpdate = true
-							}
-							if parsedEnd != nil && (!existing.End.Valid || !existing.End.Time.Equal(*parsedEnd)) {
-								needUpdate = true
-							}
-						}
-						ipidID = existing.IpidID
-						if needUpdate {
-							if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, startDate, endDate, now, body.CreatedBy, ipidID); err != nil {
-								return c.Status(500).JSON(5)
-							}
-						}
-					} else {
-						if err != sql.ErrNoRows {
-							return c.Status(500).JSON(5)
-						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
-						if err != nil {
-							return c.Status(500).JSON(5)
-						}
-						id, _ := res2.LastInsertId()
-						ipidID = id
-					}
-					results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
-				}
-				continue
-			}
-
-			// If globalSu has multiple tokens and sdList exists, create cross-product
-			if !suPerRow && len(globalSu) > 1 {
-				for _, su := range globalSu {
-					var existing struct {
-						IpidID int64        `db:"ipid_id"`
-						Start  sql.NullTime `db:"ipid_start_date"`
-						End    sql.NullTime `db:"ipid_end_date"`
-					}
-					sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
-					err = tx.Get(&existing, sel, ipiID, sd, sd, su, su, lineVal, lineVal)
-					var ipidID int64
-					if err == nil {
-						needUpdate := false
-						if parsedStart == nil && existing.Start.Valid {
-							needUpdate = true
-						}
-						if parsedStart != nil && (!existing.Start.Valid || !existing.Start.Time.Equal(*parsedStart)) {
-							needUpdate = true
-						}
-						if !needUpdate {
-							if parsedEnd == nil && existing.End.Valid {
-								needUpdate = true
-							}
-							if parsedEnd != nil && (!existing.End.Valid || !existing.End.Time.Equal(*parsedEnd)) {
-								needUpdate = true
-							}
-						}
-						ipidID = existing.IpidID
-						if needUpdate {
-							if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, startDate, endDate, now, body.CreatedBy, ipidID); err != nil {
-								return c.Status(500).JSON(5)
-							}
-						}
-					} else {
-						if err != sql.ErrNoRows {
-							return c.Status(500).JSON(5)
-						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
-						if err != nil {
-							return c.Status(500).JSON(5)
-						}
-						id, _ := res2.LastInsertId()
-						ipidID = id
-					}
-					results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
-				}
-				continue
-			}
-
-			// Default: single insert using sd and suVal (may be nil)
-			var existing struct {
-				IpidID int64        `db:"ipid_id"`
-				Start  sql.NullTime `db:"ipid_start_date"`
-				End    sql.NullTime `db:"ipid_end_date"`
-			}
-			sel := `SELECT ipid_id, ipid_start_date, ipid_end_date FROM info_project_item_detail WHERE ref_id = ? AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?) AND ((su_id IS NULL AND ? IS NULL) OR su_id = ?) AND ((ipid_line_code IS NULL AND ? IS NULL) OR ipid_line_code = ?) AND ipid_type = 'ppap' LIMIT 1`
-			err = tx.Get(&existing, sel, ipiID, sd, sd, suVal, suVal, lineVal, lineVal)
-			var ipidID int64
-			if err == nil {
-				needUpdate := false
-				if parsedStart == nil && existing.Start.Valid {
-					needUpdate = true
-				}
-				if parsedStart != nil && (!existing.Start.Valid || !existing.Start.Time.Equal(*parsedStart)) {
-					needUpdate = true
-				}
-				if !needUpdate {
-					if parsedEnd == nil && existing.End.Valid {
-						needUpdate = true
-					}
-					if parsedEnd != nil && (!existing.End.Valid || !existing.End.Time.Equal(*parsedEnd)) {
-						needUpdate = true
-					}
-				}
-				ipidID = existing.IpidID
-				if needUpdate {
-					if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, startDate, endDate, now, body.CreatedBy, ipidID); err != nil {
-						return c.Status(500).JSON(5)
-					}
-				}
-			} else {
-				if err != sql.ErrNoRows {
-					return c.Status(500).JSON(5)
-				}
-				res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, suVal, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
-				if err != nil {
-					return c.Status(500).JSON(5)
-				}
-				id, _ := res2.LastInsertId()
-				ipidID = id
-			}
-			results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
 		}
 	}
 
-	// mark project as inprogress when all inserts/updates succeeded
 	if _, err := tx.Exec(`UPDATE info_project SET ip_status = ?, ip_updated_at = ?, ip_updated_by = ? WHERE ip_id = ?`, "inprogress", now, body.CreatedBy, body.IpID); err != nil {
 		return c.Status(500).JSON(5)
 	}
@@ -817,294 +723,184 @@ func InsertPPAPItemStep4(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(500).JSON(5)
 	}
 
-	// gather recipient users (su_id) for all ipid_ids touched, then send each user
-	if len(results) > 0 {
-		ipidIDs := make([]int64, 0, len(results))
-		for _, r := range results {
-			if v, ok := r["ipid_id"]; ok {
-				ipidIDs = append(ipidIDs, v)
+	// Send mail in background (same pattern as InsertAPQPByPhase)
+	go func() {
+		type mailRow struct {
+			IpCode     sql.NullString `db:"ip_code"`
+			IpPartName sql.NullString `db:"ip_part_name"`
+			IpPartNo   sql.NullString `db:"ip_part_no"`
+			IpModel    sql.NullString `db:"ip_model"`
+			ItemName   sql.NullString `db:"item_name"`
+			ItemType   sql.NullString `db:"item_type"`
+			OwnerSuID  sql.NullInt64  `db:"owner_su_id"`
+			StartDate  *time.Time     `db:"start_date"`
+			EndDate    *time.Time     `db:"end_date"`
+		}
+
+		var allRows []mailRow
+		if err := db.Select(&allRows, `
+			SELECT
+				ip.ip_code, ip.ip_part_name, ip.ip_part_no, ip.ip_model,
+				x.item_name, x.item_type, x.owner_su_id, x.start_date, x.end_date
+			FROM (
+				SELECT ai.iai_name AS item_name, pid.ipid_type AS item_type,
+				       pid.su_id AS owner_su_id,
+				       pid.ipid_start_date AS start_date, pid.ipid_end_date AS end_date
+				FROM info_project_item_detail pid
+				JOIN info_apqp_item ai ON ai.iai_id = pid.ref_id
+				WHERE pid.ipid_type = 'apqp' AND ai.ip_id = ? AND pid.ipid_status_flg = 'sendandsubmit'
+				UNION ALL
+				SELECT pi.ipi_name AS item_name, pid.ipid_type AS item_type,
+				       pid.su_id AS owner_su_id,
+				       pid.ipid_start_date AS start_date, pid.ipid_end_date AS end_date
+				FROM info_project_item_detail pid
+				JOIN info_ppap_item pi ON pi.ipi_id = pid.ref_id
+				WHERE pid.ipid_type = 'ppap' AND pi.ip_id = ? AND pid.ipid_status_flg = 'sendandsubmit'
+			) x
+			LEFT JOIN info_project ip ON ip.ip_id = ?
+			ORDER BY x.item_type ASC, x.start_date ASC, x.item_name ASC
+		`, body.IpID, body.IpID, body.IpID); err != nil {
+			log.Printf("InsertPPAPItemStep4 mail: query allRows error: %v", err)
+			return
+		}
+		if len(allRows) == 0 {
+			return
+		}
+
+		// Collect unique su_ids from allRows
+		seenSu := map[int64]struct{}{}
+		for _, r := range allRows {
+			if r.OwnerSuID.Valid && r.OwnerSuID.Int64 != 0 {
+				seenSu[r.OwnerSuID.Int64] = struct{}{}
 			}
 		}
-		if len(ipidIDs) > 0 {
-			// get distinct su_id values touched
-			q, args, err := sqlx.In(`SELECT DISTINCT su_id FROM info_project_item_detail WHERE ipid_id IN (?) AND su_id IS NOT NULL AND su_id <> 0`, ipidIDs)
-			if err == nil {
-				q = db.Rebind(q)
-				var suIDs []int64
-				if err := db.Select(&suIDs, q, args...); err == nil && len(suIDs) > 0 {
-					// Get sender's first and last name from created_by
-					var senderFirstName, senderLastName sql.NullString
-					err := db.QueryRow(`SELECT su_firstname, su_lastname FROM sys_user WHERE su_emp_code = CAST(? AS SIGNED) LIMIT 1`, body.CreatedBy).Scan(&senderFirstName, &senderLastName)
-					var senderName string
-					if err == nil && (senderFirstName.Valid || senderLastName.Valid) {
-						if senderFirstName.Valid && senderLastName.Valid {
-							senderName = senderFirstName.String + " " + senderLastName.String
-						} else if senderFirstName.Valid {
-							senderName = senderFirstName.String
-						} else if senderLastName.Valid {
-							senderName = senderLastName.String
+		if len(seenSu) == 0 {
+			return
+		}
+
+		subject := "TBKK Project Control Notification : waiting upload file"
+
+		for suID := range seenSu {
+			var email string
+			if err := db.Get(&email, `SELECT su_email FROM sys_user WHERE su_id = ? AND su_status = 'active' AND su_email IS NOT NULL AND su_email <> '' LIMIT 1`, suID); err != nil {
+				continue
+			}
+			toEmail := strings.TrimSpace(email)
+			if toEmail == "" {
+				continue
+			}
+
+			var firstname string
+			var fn, ln sql.NullString
+			_ = db.QueryRow(`SELECT su_firstname, su_lastname FROM sys_user WHERE su_id = ? LIMIT 1`, suID).Scan(&fn, &ln)
+			if fn.Valid && fn.String != "" {
+				firstname = fn.String
+			} else {
+				firstname = fmt.Sprintf("%v", suID)
+			}
+
+			// CC from sys_workflow by sd_id
+			var sdID sql.NullInt64
+			_ = db.Get(&sdID, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, suID)
+			var ccEmails []string
+			if sdID.Valid {
+				ccRows, err := db.Queryx(`
+					SELECT su.su_email FROM sys_workflow sw
+					JOIN sys_user su ON sw.su_id = su.su_id
+					WHERE sw.sd_id = ? AND sw.sw_status = 'active'
+					  AND su.su_status = 'active' AND su.su_email IS NOT NULL AND su.su_email <> ''
+				`, sdID.Int64)
+				if err == nil {
+					for ccRows.Next() {
+						var cc sql.NullString
+						if err := ccRows.Scan(&cc); err == nil && cc.Valid {
+							if e := strings.TrimSpace(cc.String); e != "" && !strings.EqualFold(e, toEmail) {
+								ccEmails = append(ccEmails, e)
+							}
 						}
 					}
-					if senderName == "" {
-						senderName = body.CreatedBy
-					}
-					projQuery := `SELECT DISTINCT
-						ip.ip_code,
-						ip.ip_part_name,
-						ip.ip_part_no,
-						ip.ip_model,
-						x.item_name,
-						x.item_type,
-						x.start_date,
-						x.end_date,
-						x.created_by,
-						x.ipid_status,
-						x.owner_su_id
-					FROM
-					(
-							SELECT
-								ai.ip_id                                   AS ip_id,
-								ai.iai_name                                AS item_name,
-								pid.ipid_type                              AS item_type,
-								COALESCE(pid.su_id,ipid_line_code)         AS owner_su_id,
-								pid.ipid_start_date                        AS start_date,
-								pid.ipid_end_date                          AS end_date,
-								pid.ipid_id                                AS ipid_id,
-								pid.ipid_status                            AS ipid_status,
-								pid.ipid_created_by                        AS created_by
-							FROM info_project_item_detail pid
-							JOIN info_apqp_item ai
-							ON ai.iai_id = pid.ref_id
-							AND pid.ipid_type = 'apqp'
-                        
-							WHERE ai.ip_id = ? AND pid.ipid_status_flg <> 'sendbyphase'
-
-						UNION ALL
-
-						SELECT
-								pi.ip_id                                   AS ip_id,
-								pi.ipi_name                                AS item_name,
-								pid.ipid_type                              AS item_type,
-								COALESCE(pid.su_id,ipid_line_code)         AS owner_su_id,
-								pid.ipid_start_date                        AS start_date,
-								pid.ipid_end_date                          AS end_date,
-								pid.ipid_id                                AS ipid_id,
-								pid.ipid_status                            AS ipid_status,
-								pid.ipid_created_by                        AS created_by
-						FROM info_project_item_detail pid
-						JOIN info_ppap_item pi
-							ON pi.ipi_id = pid.ref_id  AND pid.ipid_type = 'ppap'
-						AND pid.ipid_type = 'ppap'
-						WHERE pi.ip_id = ?
-				) x
-				LEFT JOIN sys_user su
-					ON su.su_id = x.owner_su_id
-				LEFT JOIN info_project ip 
-					ON x.ip_id = ip.ip_id
-				WHERE x.owner_su_id = ?
-				ORDER BY
-					x.item_type ASC,
-					x.start_date ASC,
-					x.item_name ASC;`
-
-					for _, suID := range suIDs {
-						// get user's email
-						var email string
-						if err := db.Get(&email, `SELECT su_email FROM sys_user WHERE su_id = ? AND su_status = 'active' AND su_email IS NOT NULL AND su_email <> '' LIMIT 1`, suID); err != nil || strings.TrimSpace(email) == "" {
-							continue
-						}
-
-						// get recipient user's first and last name
-						var recFirstName, recLastName sql.NullString
-						db.QueryRow(`SELECT su_firstname, su_lastname FROM sys_user WHERE su_id = ? LIMIT 1`, suID).Scan(&recFirstName, &recLastName)
-						var recipientName string
-						if recFirstName.Valid && recLastName.Valid {
-							recipientName = recFirstName.String + " " + recLastName.String
-						} else if recFirstName.Valid {
-							recipientName = recFirstName.String
-						} else if recLastName.Valid {
-							recipientName = recLastName.String
-						}
-						if recipientName == "" {
-							recipientName = fmt.Sprintf("%v", suID)
-						}
-
-						// fetch project information
-						var projectDetail struct {
-							ProjectCode utils.NullString
-							PartName    utils.NullString
-							PartNo      utils.NullString
-							IpModel     utils.NullString
-						}
-						db.Get(&projectDetail, `SELECT ip_code, ip_part_name, ip_part_no, ip_model FROM info_project WHERE ip_id = ? LIMIT 1`, body.IpID)
-
-						// fetch project items for this su_id within the ip_id we just modified
-						var rows []struct {
-							IpCode     utils.NullString `db:"ip_code" json:"ip_code"`
-							IpPartName utils.NullString `db:"ip_part_name" json:"ip_part_name"`
-							IpPartNo   utils.NullString `db:"ip_part_no" json:"ip_part_no"`
-							ItemName   utils.NullString `db:"item_name" json:"item_name"`
-							ItemType   utils.NullString `db:"item_type" json:"item_type"`
-							IpModel    utils.NullString `db:"ip_model" json:"ip_model"`
-							OwnerSuID  sql.NullInt64    `db:"owner_su_id" json:"owner_su_id"`
-							StartDate  *time.Time       `db:"start_date" json:"start_date"`
-							EndDate    *time.Time       `db:"end_date" json:"end_date"`
-
-							CreatedBy utils.NullString `db:"created_by" json:"created_by"`
-							Status    utils.NullString `db:"ipid_status" json:"status"`
-						}
-						if err := db.Select(&rows, projQuery, body.IpID, body.IpID, suID); err != nil {
-							continue
-						}
-						if len(rows) == 0 {
-							continue
-						}
-
-						// build modern HTML with card layout
-						var sb strings.Builder
-						var i int
-						sb.WriteString("<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>Dear, K." + html.EscapeString(recipientName) + "</h3>")
-						sb.WriteString("<h4>You have new project please <b style='color : #0952c0;'>Upload file</b> in website Project Management</h4>")
-						sb.WriteString("<html><body style='font-family: Arial, sans-serif; background:#f6f8fb; padding:20px;'>")
-
-						// Project Detail Card
-						sb.WriteString("<div style='margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:20px;'>")
-						sb.WriteString("<div style='font-size:18px; font-weight:bold; color:#1f2d3d;'>Project Detail</div>")
-						sb.WriteString("<div style='font-size:12px; color:#6b7280;'>PPAP Item Information (ข้อมูลของรายการโปรเจค)</div>")
-
-						sb.WriteString("<hr style='border:none; border-top:1px dashed #d1d5db; margin:15px 0;'>")
-
-						// Project Information 3-Column Layout
-						sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse;'>")
-						sb.WriteString("<tr>")
-
-						sb.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-						sb.WriteString("<div style='font-size:12px; color:#374151;'>PROJECT CODE</div>")
-						sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>#" + html.EscapeString(htmlEscapeNullString(rows[0].IpCode)) + "</div>")
-						sb.WriteString("</td>")
-
-						sb.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-						sb.WriteString("<div style='font-size:12px; color:#374151;'>MODEL</div>")
-						sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(htmlEscapeNullString(rows[0].IpModel)) + "</div>")
-						sb.WriteString("</td>")
-
-						sb.WriteString("</tr>")
-						sb.WriteString("<tr>")
-
-						sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-						sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NO</div>")
-						sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(htmlEscapeNullString(rows[0].IpPartNo)) + "</div>")
-						sb.WriteString("</td>")
-
-						sb.WriteString("<td colspan='2' style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'>")
-						sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NAME</div>")
-						sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(htmlEscapeNullString(rows[0].IpPartName)) + "</div>")
-						sb.WriteString("</td>")
-
-						sb.WriteString("</tr>")
-						sb.WriteString("</table>")
-						sb.WriteString("<div style='margin-top:20px; font-size:14px; color:#374151;'>")
-						sb.WriteString("</div>")
-						sb.WriteString("</div><br>")
-
-						// Items Table
-						sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse; border:1px solid #e5e7eb;'>")
-						sb.WriteString("<thead><tr style='background:#f3f4f6; border-bottom:2px solid #d1d5db;'>")
-						cols := []string{"No.", "Item Name", "Item Type", "Start Date", "End Date"}
-						for _, c := range cols {
-							sb.WriteString("<th style='text-align:left; font-weight:bold; color:#374151; font-size:13px;'>" + html.EscapeString(c) + "</th>")
-						}
-						sb.WriteString("</tr></thead><tbody>")
-
-						for _, r := range rows {
-							var startStr, endStr string
-							if r.StartDate != nil {
-								startStr = r.StartDate.Format("2006-01-02")
-							}
-							if r.EndDate != nil {
-								endStr = r.EndDate.Format("2006-01-02")
-							}
-
-							rowBg := ""
-							if i%2 == 0 {
-								rowBg = " style='background:#fbfdff;'"
-							}
-							sb.WriteString("<tr" + rowBg + ">")
-							sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + strconv.Itoa(i+1) + "</td>")
-							sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(htmlEscapeNullString(r.ItemName)) + "</td>")
-							sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(htmlEscapeNullString(r.ItemType)) + "</td>")
-							sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(startStr) + "</td>")
-							sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(endStr) + "</td>")
-							sb.WriteString("</tr>")
-							i++
-						}
-
-						sb.WriteString("</tbody></table>")
-
-						sb.WriteString("<div style='margin-top:20px;'>")
-						sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
-						sb.WriteString("</div>")
-
-						sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
-						sb.WriteString("<p>Best Regards,<br><strong>System Service Department</strong></p>")
-						sb.WriteString("</div>")
-
-						sb.WriteString("</body></html>")
-
-						subject := "TBKK Project Control Notification : waiting upload file"
-						bodyHtml := sb.String()
-
-						// check SMTP config before sending
-						host := strings.TrimSpace(os.Getenv("SMTP_HOST"))
-						port := strings.TrimSpace(os.Getenv("SMTP_PORT"))
-						user := strings.TrimSpace(os.Getenv("SMTP_USER"))
-						pass := os.Getenv("SMTP_PASS")
-						if host == "" || port == "" || user == "" || pass == "" {
-							log.Printf("SendMail skipped: smtp configuration incomplete")
-							continue
-						}
-
-						// Build CC list from sys_workflow by recipient's sd_id
-						ppapToEmail := strings.TrimSpace(email)
-						var ppapCCEmails []string
-						var ppapSdID sql.NullInt64
-						if err := db.Get(&ppapSdID, `SELECT sd_id FROM sys_user WHERE su_id = ? LIMIT 1`, suID); err == nil && ppapSdID.Valid {
-							ccRows, ccErr := db.Queryx(`
-								SELECT su.su_email
-								FROM sys_workflow sw
-								JOIN sys_user su ON sw.su_id = su.su_id
-								WHERE sw.sd_id = ?
-								  AND sw.sw_status = 'active'
-								  AND su.su_status = 'active'
-								  AND su.su_email IS NOT NULL
-								  AND su.su_email <> ''
-							`, ppapSdID.Int64)
-							if ccErr == nil {
-								for ccRows.Next() {
-									var ccEmail sql.NullString
-									if err := ccRows.Scan(&ccEmail); err == nil && ccEmail.Valid {
-										if e := strings.TrimSpace(ccEmail.String); e != "" && !strings.EqualFold(e, ppapToEmail) {
-											ppapCCEmails = append(ppapCCEmails, e)
-										}
-									}
-								}
-								ccRows.Close()
-							}
-						}
-
-						// send asynchronously to the single recipient
-						go func(to string, cc []string) {
-							if err := SendMailWithCC([]string{to}, cc, subject, bodyHtml, "text/html; charset=utf-8"); err != nil {
-								log.Printf("SendMail error: %v", err)
-							}
-						}(ppapToEmail, ppapCCEmails)
-					}
+					ccRows.Close()
 				}
 			}
-		}
-	}
-	return c.Status(201).JSON(1)
 
+			// Filter rows for this recipient
+			var rows []mailRow
+			for _, r := range allRows {
+				if r.OwnerSuID.Valid && r.OwnerSuID.Int64 == suID {
+					rows = append(rows, r)
+				}
+			}
+			if len(rows) == 0 {
+				continue
+			}
+
+			var sb strings.Builder
+			sb.WriteString("<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>Dear, K." + html.EscapeString(firstname) + "</h3>")
+			sb.WriteString("<h4>You have new project please <b style='color:#0952c0;'>Upload file</b> in website Project Management</h4>")
+			sb.WriteString("<html><body style='font-family: Arial, sans-serif; background:#f6f8fb; padding:20px;'>")
+			sb.WriteString("<div style='margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:20px;'>")
+			sb.WriteString("<div style='font-size:18px; font-weight:bold; color:#1f2d3d;'>Project Detail</div>")
+			sb.WriteString("<div style='font-size:12px; color:#6b7280;'>PPAP Item Information</div>")
+			sb.WriteString("<hr style='border:none; border-top:1px dashed #d1d5db; margin:15px 0;'>")
+			sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse;'><tr>")
+			getStr := func(ns sql.NullString) string {
+				if ns.Valid {
+					return ns.String
+				}
+				return "-"
+			}
+			sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'><div style='font-size:12px; color:#374151;'>PROJECT CODE</div><div style='font-size:14px; font-weight:bold; color:#2563eb;'>#" + html.EscapeString(getStr(rows[0].IpCode)) + "</div></td>")
+			sb.WriteString("<td style='width:50%; border:1px solid #e5e7eb; border-radius:8px; padding:12px;'><div style='font-size:12px; color:#374151;'>MODEL</div><div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(rows[0].IpModel)) + "</div></td>")
+			sb.WriteString("</tr><tr>")
+			sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'><div style='font-size:12px; color:#374151;'>PART NO</div><div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(rows[0].IpPartNo)) + "</div></td>")
+			sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px; padding:12px;'><div style='font-size:12px; color:#374151;'>PART NAME</div><div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStr(rows[0].IpPartName)) + "</div></td>")
+			sb.WriteString("</tr></table></div><br>")
+			sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse; border:1px solid #e5e7eb;'>")
+			sb.WriteString("<thead><tr style='background:#f3f4f6; border-bottom:2px solid #d1d5db;'>")
+			for _, col := range []string{"No.", "Item Name", "Item Type", "Start Date", "End Date"} {
+				sb.WriteString("<th style='text-align:left; font-weight:bold; color:#374151; font-size:13px;'>" + html.EscapeString(col) + "</th>")
+			}
+			sb.WriteString("</tr></thead><tbody>")
+			for idx, r := range rows {
+				var startStr, endStr string
+				if r.StartDate != nil {
+					startStr = r.StartDate.Format("2006-01-02")
+				}
+				if r.EndDate != nil {
+					endStr = r.EndDate.Format("2006-01-02")
+				}
+				rowBg := ""
+				if idx%2 == 0 {
+					rowBg = " style='background:#fbfdff;'"
+				}
+				itemName := ""
+				if r.ItemName.Valid {
+					itemName = r.ItemName.String
+				}
+				itemType := ""
+				if r.ItemType.Valid {
+					itemType = r.ItemType.String
+				}
+				sb.WriteString("<tr" + rowBg + ">")
+				sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + strconv.Itoa(idx+1) + "</td>")
+				sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(itemName) + "</td>")
+				sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(itemType) + "</td>")
+				sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(startStr) + "</td>")
+				sb.WriteString("<td style='border-bottom:1px solid #e5e7eb; padding:10px; font-size:13px;'>" + html.EscapeString(endStr) + "</td>")
+				sb.WriteString("</tr>")
+			}
+			sb.WriteString("</tbody></table>")
+			sb.WriteString("<div style='margin-top:20px;'><a href='http://192.168.161.205:4009/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a></div>")
+			sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'><p>Best Regards,<br><strong>System Service Department</strong></p></div>")
+			sb.WriteString("</body></html>")
+
+			if mailErr := SendMailWithCC([]string{toEmail}, ccEmails, subject, sb.String(), "text/html; charset=utf-8"); mailErr != nil {
+				log.Printf("InsertPPAPItemStep4 mail: send error to %s: %v", toEmail, mailErr)
+			}
+		}
+	}()
+
+	return c.Status(201).JSON(1)
 }
 
 func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
@@ -1151,7 +947,25 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 
 	now := time.Now()
 
+	markAPQPNullStatusAsDraft := func() error {
+		_, err := tx.Exec(`
+			UPDATE info_project_item_detail ipid
+			JOIN info_apqp_item iai ON iai.iai_id = ipid.ref_id
+			SET ipid.ipid_status_flg = 'draft',
+				ipid.ipid_updated_at = ?,
+				ipid.ipid_updated_by = ?
+			WHERE iai.ip_id = ?
+			  AND ipid.ipid_type = 'apqp'
+			  AND ipid.ipid_status_flg IS NULL
+		`, now, body.CreatedBy, body.IpID)
+		return err
+	}
+
 	if n == 0 {
+		if err := markAPQPNullStatusAsDraft(); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "update apqp draft status failed", "detail": err.Error()})
+		}
+
 		if _, err := tx.Exec(`UPDATE info_project SET ip_status = ?, ip_updated_at = ?, ip_updated_by = ? WHERE ip_id = ?`, "draft", now, body.CreatedBy, body.IpID); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -1656,6 +1470,10 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 			results = append(results, map[string]int64{"ipi_id": ipiID, "ipid_id": ipidID})
 		}
+	}
+
+	if err := markAPQPNullStatusAsDraft(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "update apqp draft status failed", "detail": err.Error()})
 	}
 
 	// mark project as draft when all inserts/updates succeeded

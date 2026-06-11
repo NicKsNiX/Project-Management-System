@@ -346,7 +346,7 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 					SELECT
 						mmm_id,
 						GROUP_CONCAT(DISTINCT mce_id ORDER BY mce_id SEPARATOR ',') AS mce_id,
-						GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_name SEPARATOR ',') AS mce_names
+						GROUP_CONCAT(DISTINCT mce_name ORDER BY mce_id SEPARATOR ',') AS mce_names
 					FROM mst_customer_event
 					WHERE mce_status = 'active'
 					GROUP BY mmm_id
@@ -443,17 +443,6 @@ func IssueInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 		}
 	}
 
-	// -------------------------
-	// 2) Duplicate check by ip_code
-	// -------------------------
-	var exists int
-	if err := db.Get(&exists, `SELECT 1 FROM info_project WHERE ip_code = ? LIMIT 1`, req.Code); err != nil && err != sql.ErrNoRows {
-		return c.Status(500).JSON(5.1)
-	}
-	if exists == 1 {
-		return c.Status(200).JSON(2)
-	}
-
 	now := time.Now()
 
 	// -------------------------
@@ -464,6 +453,83 @@ func IssueInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(500).JSON(5.2)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// -------------------------
+	// 3.1) Generate ip_code on backend
+	// -------------------------
+	codePattern := strings.TrimSpace(req.Code.StringValue())
+	if codePattern == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "ip_code pattern is required"})
+	}
+
+	codeParts := strings.SplitN(codePattern, "-", 3)
+	if len(codeParts) != 3 {
+		return c.Status(400).JSON(fiber.Map{"error": "ip_code must use format PREFIX-YY-SEQ"})
+	}
+
+	norm := regexp.MustCompile(`[^A-Za-z0-9_-]`)
+	pos1 := norm.ReplaceAllString(strings.TrimSpace(codeParts[0]), "_")
+	pos2 := norm.ReplaceAllString(strings.TrimSpace(codeParts[1]), "_")
+	seqPattern := norm.ReplaceAllString(strings.TrimSpace(codeParts[2]), "_")
+	if pos1 == "" || pos2 == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid ip_code prefix"})
+	}
+	seqWidth := len(seqPattern)
+	if seqWidth < 3 {
+		seqWidth = 3
+	}
+
+	lockName := fmt.Sprintf("info_project_doc_no:%d:%s:%s", req.MdtID, pos1, pos2)
+	var lockOK int
+	if err := tx.Get(&lockOK, `SELECT GET_LOCK(?, 10)`, lockName); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "lock doc no failed", "detail": err.Error()})
+	}
+	if lockOK != 1 {
+		return c.Status(409).JSON(fiber.Map{"error": "doc no is busy, please try again"})
+	}
+	defer func() { _, _ = tx.Exec(`SELECT RELEASE_LOCK(?)`, lockName) }()
+
+	var maxRunSeq int
+	if err := tx.Get(&maxRunSeq, `
+		SELECT COALESCE(MAX(CAST(idrn_last_seq AS UNSIGNED)), 0)
+		FROM info_doc_run_no
+		WHERE mdt_id = ? AND idrn_pos_1 = ? AND idrn_pos_2 = ?
+	`, req.MdtID, pos1, pos2); err != nil && err != sql.ErrNoRows {
+		return c.Status(500).JSON(fiber.Map{"error": "query doc run no failed", "detail": err.Error()})
+	}
+
+	var maxProjectSeq int
+	if err := tx.Get(&maxProjectSeq, `
+		SELECT COALESCE(MAX(CAST(SUBSTRING_INDEX(ip_code, '-', -1) AS UNSIGNED)), 0)
+		FROM info_project
+		WHERE mdt_id = ? AND ip_code LIKE ?
+	`, req.MdtID, fmt.Sprintf("%s-%s-%%", pos1, pos2)); err != nil && err != sql.ErrNoRows {
+		return c.Status(500).JSON(fiber.Map{"error": "query project code failed", "detail": err.Error()})
+	}
+
+	nextSeq := maxRunSeq
+	if maxProjectSeq > nextSeq {
+		nextSeq = maxProjectSeq
+	}
+
+	var generatedCode string
+	for i := 0; i < 1000; i++ {
+		nextSeq++
+		generatedCode = fmt.Sprintf("%s-%s-%0*d", pos1, pos2, seqWidth, nextSeq)
+
+		var exists int
+		if err := tx.Get(&exists, `SELECT 1 FROM info_project WHERE ip_code = ? LIMIT 1`, generatedCode); err != nil && err != sql.ErrNoRows {
+			return c.Status(500).JSON(5.1)
+		}
+		if exists != 1 {
+			break
+		}
+		generatedCode = ""
+	}
+	if generatedCode == "" {
+		return c.Status(409).JSON(fiber.Map{"error": "cannot generate unique ip_code"})
+	}
+	req.Code = utils.NewNullString(generatedCode)
 
 	// -------------------------
 	// 4) Insert info_project
@@ -503,36 +569,21 @@ func IssueInfoProject(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(500).JSON(5.4)
 	}
 
-	// If front provided an ip_code like PJC-26-001, split and insert into info_doc_run_no
-	if req.Code.Valid && strings.TrimSpace(req.Code.String) != "" {
-		parts := strings.SplitN(req.Code.String, "-", 3)
-		if len(parts) == 3 {
-			pos1 := strings.TrimSpace(parts[0])
-			pos2 := strings.TrimSpace(parts[1])
-			lastSeq := strings.TrimSpace(parts[2])
-			// normalize parts to safe chars
-			norm := regexp.MustCompile(`[^A-Za-z0-9_-]`)
-			pos1 = norm.ReplaceAllString(pos1, "_")
-			pos2 = norm.ReplaceAllString(pos2, "_")
-			lastSeq = norm.ReplaceAllString(lastSeq, "_")
-
-			_, err = tx.NamedExec(`
-				INSERT INTO info_doc_run_no (mdt_id, idrn_pos_1, idrn_pos_2, idrn_last_seq, idrn_created_at, idrn_created_by, idrn_updated_at, idrn_updated_by)
-				VALUES (:mdt_id, :idrn_pos_1, :idrn_pos_2, :idrn_last_seq, :idrn_created_at, :idrn_created_by, :idrn_updated_at, :idrn_updated_by)
-			`, map[string]any{
-				"mdt_id":          req.MdtID,
-				"idrn_pos_1":      pos1,
-				"idrn_pos_2":      pos2,
-				"idrn_last_seq":   lastSeq,
-				"idrn_created_at": now,
-				"idrn_created_by": req.CreatedBy,
-				"idrn_updated_at": now,
-				"idrn_updated_by": req.CreatedBy,
-			})
-			if err != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "insert info_doc_run_no failed", "detail": err.Error()})
-			}
-		}
+	_, err = tx.NamedExec(`
+		INSERT INTO info_doc_run_no (mdt_id, idrn_pos_1, idrn_pos_2, idrn_last_seq, idrn_created_at, idrn_created_by, idrn_updated_at, idrn_updated_by)
+		VALUES (:mdt_id, :idrn_pos_1, :idrn_pos_2, :idrn_last_seq, :idrn_created_at, :idrn_created_by, :idrn_updated_at, :idrn_updated_by)
+	`, map[string]any{
+		"mdt_id":          req.MdtID,
+		"idrn_pos_1":      pos1,
+		"idrn_pos_2":      pos2,
+		"idrn_last_seq":   fmt.Sprintf("%0*d", seqWidth, nextSeq),
+		"idrn_created_at": now,
+		"idrn_created_by": req.CreatedBy,
+		"idrn_updated_at": now,
+		"idrn_updated_by": req.CreatedBy,
+	})
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "insert info_doc_run_no failed", "detail": err.Error()})
 	}
 
 	// -------------------------
@@ -841,8 +892,8 @@ func SelectModel(c *fiber.Ctx, db *sqlx.DB) error {
 									mmm.mmm_id, 
 									mmm.mmm_model, 
 									mmm.mmm_customer_name,
-									GROUP_CONCAT(DISTINCT mce.mce_id ORDER BY mce.mce_id SEPARATOR ',') AS mce_id,
-									GROUP_CONCAT(DISTINCT mce.mce_name ORDER BY mce.mce_name SEPARATOR ', ') AS mce_name
+									GROUP_CONCAT(DISTINCT mce.mce_id ORDER BY mce.mce_id ASC SEPARATOR ',') AS mce_id,
+									GROUP_CONCAT(DISTINCT mce.mce_name ORDER BY mce.mce_id SEPARATOR ', ') AS mce_name
 									FROM mst_model_master mmm
 									LEFT JOIN mst_customer_event mce 
 									ON mmm.mmm_id = mce.mmm_id 
@@ -1281,7 +1332,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 			ipidID := existing.IpidID
 			if needUpdate {
-				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ?, ipid_status_flg = 'sendandsubmit' WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
+				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
 					return 0, err
 				}
 			}
@@ -1304,7 +1355,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 				LIMIT 1`
 			if err2 := tx.Get(&candidate, sel2, refID, sd, sd, su, su, line, line); err2 == nil {
 				// Build UPDATE that sets only columns for which incoming value is non-nil
-				parts := []string{"ipid_start_date = ?", "ipid_end_date = ?", "ipid_updated_at = ?", "ipid_updated_by = ?", "ipid_status_flg = 'sendbyphase'"}
+				parts := []string{"ipid_start_date = ?", "ipid_end_date = ?", "ipid_updated_at = ?", "ipid_updated_by = ?"}
 				args := []interface{}{start, end, now, body.CreatedBy}
 				if sd != nil {
 					parts = append([]string{"sd_id = ?"}, parts...)
@@ -1328,8 +1379,8 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 
 			// no candidate -> insert new row
-			res, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				refID, sd, su, line, "apqp", start, end, "inprogress", "sendandsubmit", now, body.CreatedBy, now, body.CreatedBy,
+			res, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				refID, sd, su, line, "apqp", start, end, "inprogress", now, body.CreatedBy, now, body.CreatedBy,
 			)
 			if err != nil {
 				return 0, err
@@ -1339,7 +1390,13 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 		}
 	}
 
+	sentIaiIDs := make(map[int64]struct{}, n)
+
 	for i := 0; i < n; i++ {
+		maName := strings.TrimSpace(body.MaName[i])
+		if maName == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "ma_name required"})
+		}
 
 		// ---- insert or reuse info_apqp_item ----
 		var mppVal any = nil
@@ -1350,7 +1407,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 
 		if mppVal != nil {
 			if err := tx.Get(&iaiID, `SELECT iai_id FROM info_apqp_item WHERE ip_id = ? AND iai_name = ? AND mpp_id = ? LIMIT 1`,
-				body.IpID, body.MaName[i], mppVal,
+				body.IpID, maName, mppVal,
 			); err != nil {
 				if err == sql.ErrNoRows {
 					res, err := tx.NamedExec(`
@@ -1361,7 +1418,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 					`, map[string]any{
 						"ipmp_id":        nil,
 						"mpp_id":         mppVal,
-						"iai_name":       body.MaName[i],
+						"iai_name":       maName,
 						"iai_created_at": now,
 						"iai_created_by": body.CreatedBy,
 						"ip_id":          body.IpID,
@@ -1376,7 +1433,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 		} else {
 			if err := tx.Get(&iaiID, `SELECT iai_id FROM info_apqp_item WHERE ip_id = ? AND iai_name = ? LIMIT 1`,
-				body.IpID, body.MaName[i],
+				body.IpID, maName,
 			); err != nil {
 				if err == sql.ErrNoRows {
 					res, err := tx.NamedExec(`
@@ -1387,7 +1444,7 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 					`, map[string]any{
 						"ipmp_id":        nil,
 						"mpp_id":         mppVal,
-						"iai_name":       body.MaName[i],
+						"iai_name":       maName,
 						"iai_created_at": now,
 						"iai_created_by": body.CreatedBy,
 						"ip_id":          body.IpID,
@@ -1446,6 +1503,9 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 			return nil, nil
 		}
 
+		// Track processed iaiID so the post-loop cancel can skip it
+		sentIaiIDs[iaiID] = struct{}{}
+
 		// Process su_id list and derive sd_id from each
 		if suPerRow && len(suList) > 0 {
 			// su provided per-row: insert one row per su with sd_id derived from su_id
@@ -1473,6 +1533,27 @@ func InsertProjectStep3(c *fiber.Ctx, db *sqlx.DB) error {
 				}
 				// info_approval insertion removed; continue
 			}
+		}
+	}
+
+	// Cancel rows for this project that were not in the payload
+	if len(sentIaiIDs) > 0 {
+		ids := make([]int64, 0, len(sentIaiIDs))
+		for id := range sentIaiIDs {
+			ids = append(ids, id)
+		}
+		cancelQ, cancelArgs, err := sqlx.In(
+			`UPDATE info_project_item_detail pid
+			 JOIN info_apqp_item iai ON iai.iai_id = pid.ref_id
+			 SET pid.ipid_status_flg = 'cancel', pid.ipid_updated_at = ?, pid.ipid_updated_by = ?
+			 WHERE iai.ip_id = ? AND pid.ipid_type = 'apqp' AND pid.ref_id NOT IN (?)`,
+			now, body.CreatedBy, body.IpID, ids,
+		)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "build cancel query failed", "detail": err.Error()})
+		}
+		if _, err := tx.Exec(cancelQ, cancelArgs...); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "cancel unsent rows failed", "detail": err.Error()})
 		}
 	}
 
@@ -1816,12 +1897,14 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 					}
 				}
 			}
-			if !needUpdate && existing.StatusFlg.Valid && existing.StatusFlg.String == "sendandsubmit" {
-				needUpdate = true
-			}
 			ipidID := existing.IpidID
 			if needUpdate {
 				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_start_date = ?, ipid_end_date = ?, ipid_updated_at = ?, ipid_updated_by = ?, ipid_status_flg = 'sendbyphase' WHERE ipid_id = ?`, start, end, now, body.CreatedBy, ipidID); err != nil {
+					return 0, err
+				}
+			} else {
+				// dates unchanged — always set sendbyphase for rows in the payload
+				if _, err := tx.Exec(`UPDATE info_project_item_detail SET ipid_status_flg = 'sendbyphase', ipid_updated_at = ?, ipid_updated_by = ? WHERE ipid_id = ?`, now, body.CreatedBy, ipidID); err != nil {
 					return 0, err
 				}
 			}
@@ -2194,7 +2277,7 @@ func InsertAPQPByPhase(c *fiber.Ctx, db *sqlx.DB) error {
 				sb.WriteString("</tbody></table>")
 
 				sb.WriteString("<div style='margin-top:20px;'>")
-				sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
+				sb.WriteString("<a href='http://192.168.161.205:4009/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
 				sb.WriteString("</div>")
 				sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
 				sb.WriteString("<p>Best Regards,<br><strong>System Service Department</strong></p>")
@@ -2222,15 +2305,20 @@ func CustomerEventGanttChart(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 
 	var out []struct {
-		Group  string `db:"group" json:"group"`
-		Name   string `db:"name" json:"name"`
-		Start  *Date  `db:"start" json:"start"`
-		End    *Date  `db:"end" json:"end"`
-		Status string `db:"status" json:"status"`
+		IpID        int64            `db:"ip_id" json:"ip_id"`
+		Group       string           `db:"group" json:"group"`
+		Name        string           `db:"name" json:"name"`
+		Start       *Date            `db:"start" json:"start"`
+		End         *Date            `db:"end" json:"end"`
+		Status      string           `db:"status" json:"status"`
+		SuEmpCode   utils.NullString `db:"su_emp_code" json:"su_emp_code"`
+		SuFirstname utils.NullString `db:"su_firstname" json:"su_firstname"`
+		SuLastname  utils.NullString `db:"su_lastname" json:"su_lastname"`
 	}
 
 	query := "SELECT " +
-		"'Customer EVT Event' AS `group`, " +
+		"ice.ip_id AS `ip_id`, " +
+		"'Customer Event' AS `group`, " +
 		"mce.mce_name AS `name`, " +
 		"ice.ice_start_date AS `start`, " +
 		"ice.ice_end_date AS `end`, " +
@@ -2238,9 +2326,14 @@ func CustomerEventGanttChart(c *fiber.Ctx, db *sqlx.DB) error {
 		"  WHEN ice.ice_start_date IS NULL THEN '' " +
 		"  WHEN ice.ice_start_date <= CURDATE() THEN 'Done' " +
 		"  ELSE 'In Process' " +
-		"END AS `status` " +
+		"END AS `status`, " +
+		"su.su_emp_code AS `su_emp_code`, " +
+		"su.su_firstname AS `su_firstname`, " +
+		"su.su_lastname AS `su_lastname` " +
 		"FROM info_customer_events ice " +
 		"LEFT JOIN mst_customer_event mce ON ice.mce_id = mce.mce_id " +
+		"LEFT JOIN info_project ip ON ice.ip_id = ip.ip_id " +
+		"LEFT JOIN sys_user su ON ip.ip_created_by = su.su_emp_code " +
 		"WHERE ice.ip_id = ? " +
 		"AND ice.ice_start_date IS NOT NULL " +
 		"ORDER BY mce.mce_name"
@@ -2531,7 +2624,7 @@ func GetListAPQPPPAPItem(c *fiber.Ctx, db *sqlx.DB) error {
 					ON a.ipid_id = x.ipid_id AND a.ia_is_action = 1
 				LEFT JOIN sys_user su
 					ON su.su_id = x.owner_su_id
-				GROUP BY x.ref_id,x.item_type
+				GROUP BY x.ref_id,x.item_type,x.department
 				ORDER BY
 					x.item_name ASC,
 					x.item_type ASC,
@@ -2593,16 +2686,16 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 
 	// Get ref_id from the given ipid_id
-	var refID int64
-	var ipidType sql.NullString
-	if err := db.Get(&refID, `SELECT ref_id FROM info_project_item_detail WHERE ipid_id = ?`, id); err != nil {
+	var targetDetail struct {
+		RefID    int64          `db:"ref_id"`
+		IpidType sql.NullString `db:"ipid_type"`
+		SdID     sql.NullInt64  `db:"sd_id"`
+	}
+	if err := db.Get(&targetDetail, `SELECT ref_id, ipid_type, sd_id FROM info_project_item_detail WHERE ipid_id = ?`, id); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "ipid_id not found"})
 	}
-
-	// Get ipid_type from the given ipid_id
-	if err := db.Get(&ipidType, `SELECT ipid_type FROM info_project_item_detail WHERE ipid_id = ?`, id); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "ipid_type not found"})
-	}
+	refID := targetDetail.RefID
+	ipidType := targetDetail.IpidType
 
 	// Get ia_type from info_approval for this ipid_id
 	var iaType sql.NullString
@@ -2610,13 +2703,19 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to get ia_type", "detail": err.Error()})
 	}
 
-	// Get all ipid_ids with the same ref_id
+	// Get all ipid_ids with the same ref_id, ipid_type, and sd_id
 	var ipidIDs []int64
-	if err := db.Select(&ipidIDs, `SELECT ipid_id FROM info_project_item_detail WHERE ref_id = ?`, refID); err != nil {
+	if err := db.Select(&ipidIDs, `
+		SELECT ipid_id
+		FROM info_project_item_detail
+		WHERE ref_id = ?
+		  AND ipid_type = ?
+		  AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?)
+	`, refID, ipidType.String, targetDetail.SdID, targetDetail.SdID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to get related ipid_ids", "detail": err.Error()})
 	}
 
-	// Update all ipid_ids with the same ref_id
+	// Update all ipid_ids in the same ref_id, ipid_type, and sd_id slice
 	for _, ipidIDVal := range ipidIDs {
 		query := `UPDATE info_project_item_detail
 		SET ipid_status = ? , ipid_updated_at = ? , ipid_updated_by = ?
@@ -2637,23 +2736,30 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 		// Build WHERE clause based on iaType
 		var updateApprovalQuery string
 		var args []interface{}
+		approvalScope := `
+			SELECT ipid_id
+			FROM info_project_item_detail
+			WHERE ref_id = ?
+			  AND ipid_type = ?
+			  AND ((sd_id IS NULL AND ? IS NULL) OR sd_id = ?)
+		`
 
 		if iaType.Valid && iaType.String != "" {
-			// Update all approvals with same ref_id and ia_type
+			// Update approvals in the same ref_id, ipid_type, sd_id slice and ia_type
 			updateApprovalQuery = `UPDATE info_approval 
 			SET ia_status = ?, ia_updated_at = ?, ia_updated_by = ?, ia_note = ? 
-			WHERE ipid_id IN (SELECT ipid_id FROM info_project_item_detail WHERE ref_id = ?) 
+			WHERE ipid_id IN (` + approvalScope + `) 
 			AND ia_status = 'waiting' AND ia_is_action = 1 AND ia_type = ? AND ia_status_flg = 'active'`
 			now := time.Now()
-			args = []interface{}{newStatus, now, UpdateBy, note, refID, iaType.String}
+			args = []interface{}{newStatus, now, UpdateBy, note, refID, ipidType.String, targetDetail.SdID, targetDetail.SdID, iaType.String}
 		} else {
-			// Fallback: update all approvals for these ipid_ids
+			// Fallback: update approvals in the same ref_id, ipid_type, sd_id slice
 			updateApprovalQuery = `UPDATE info_approval 
 			SET ia_status = ?, ia_updated_at = ?, ia_updated_by = ?, ia_note = ? 
-			WHERE ipid_id IN (SELECT ipid_id FROM info_project_item_detail WHERE ref_id = ?) 
+			WHERE ipid_id IN (` + approvalScope + `) 
 			AND ia_status = 'waiting' AND ia_is_action = 1 AND ia_status_flg = 'active'`
 			now := time.Now()
-			args = []interface{}{newStatus, now, UpdateBy, note, refID}
+			args = []interface{}{newStatus, now, UpdateBy, note, refID, ipidType.String, targetDetail.SdID, targetDetail.SdID}
 		}
 
 		if _, err := db.Exec(updateApprovalQuery, args...); err != nil {
@@ -2672,7 +2778,7 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 		}
 
 		// Get project details (first item with same ref_id)
-		q := `SELECT
+		q := `SELECT DISTINCT
 		ip.ip_code,
 		ip.ip_part_no,
 		ip.ip_part_name,
@@ -2700,7 +2806,7 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 
 			var allItems []ItemDetail
-			qItems := `SELECT
+			qItems := `SELECT DISTINCT
 			COALESCE(ai.iai_name, pi.ipi_name) AS item_name,
 			pid.ipid_type AS item_type,
 			pid.ipid_start_date,
@@ -2840,7 +2946,7 @@ func UpdateStatusProjectItemDetail(c *fiber.Ctx, db *sqlx.DB) error {
 			sb.WriteString("</tbody></table>")
 
 			sb.WriteString("<div style='margin-top:20px;'>")
-			sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
+			sb.WriteString("<a href='http://192.168.161.205:4009/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
 			sb.WriteString("</div>")
 
 			sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")

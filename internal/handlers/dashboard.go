@@ -127,93 +127,93 @@ GROUP BY
 // ListMasterPlanSummary returns a pivoted view of master plan statuses per project
 func ListMasterPlanSummary(c *fiber.Ctx, db *sqlx.DB) error {
 	query := `SELECT
-	ipmp.ip_id,
-	ip.ip_code,
-	ip.ip_customer_name,
-	ip.ip_model,
-	ip.ip_part_name,
-	ip.ip_sop_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Kick Off' THEN ipmp.ipmp_status END) AS Kick_Off,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Kick Off' THEN ipmp.ipmp_start_date END) AS Kick_Off_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Kick Off' THEN ipmp.ipmp_end_date END) AS Kick_Off_end_date,
+					ipmp.ip_id,
+					ip.ip_code,
+					ip.ip_customer_name,
+					ip.ip_model,
+					ip.ip_part_name,
+					ip.ip_sop_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Kick Off' THEN ipmp.ipmp_status END) AS Kick_Off,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Kick Off' THEN ipmp.ipmp_start_date END) AS Kick_Off_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Kick Off' THEN ipmp.ipmp_end_date END) AS Kick_Off_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Supplier Kick Off' THEN ipmp.ipmp_status END) AS Supplier_Kick_Off,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Supplier Kick Off' THEN ipmp.ipmp_start_date END) AS Supplier_Kick_Off_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Supplier Kick Off' THEN ipmp.ipmp_end_date END) AS Supplier_Kick_Off_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Supplier Kick Off' THEN ipmp.ipmp_status END) AS Supplier_Kick_Off,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Supplier Kick Off' THEN ipmp.ipmp_start_date END) AS Supplier_Kick_Off_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Supplier Kick Off' THEN ipmp.ipmp_end_date END) AS Supplier_Kick_Off_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Mold & M/C Tooling Review' THEN ipmp.ipmp_status END) AS Mold_And_MC_Tooling_Review,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Mold & M/C Tooling Review' THEN ipmp.ipmp_start_date END) AS Mold_And_MC_Tooling_Review_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Mold & M/C Tooling Review' THEN ipmp.ipmp_end_date END) AS Mold_And_MC_Tooling_Review_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Mold & M/C Tooling Review' THEN ipmp.ipmp_status END) AS Mold_And_MC_Tooling_Review,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Mold & M/C Tooling Review' THEN ipmp.ipmp_start_date END) AS Mold_And_MC_Tooling_Review_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Mold & M/C Tooling Review' THEN ipmp.ipmp_end_date END) AS Mold_And_MC_Tooling_Review_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Mold PO' THEN ipmp.ipmp_status END) AS Mold_PO,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Mold PO' THEN ipmp.ipmp_start_date END) AS Mold_PO_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Mold PO' THEN ipmp.ipmp_end_date END) AS Mold_PO_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Mold PO' THEN ipmp.ipmp_status END) AS Mold_PO,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Mold PO' THEN ipmp.ipmp_start_date END) AS Mold_PO_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Mold PO' THEN ipmp.ipmp_end_date END) AS Mold_PO_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Tooling PO' THEN ipmp.ipmp_status END) AS Tooling_PO,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Tooling PO' THEN ipmp.ipmp_start_date END) AS Tooling_PO_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Tooling PO' THEN ipmp.ipmp_end_date END) AS Tooling_PO_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Tooling PO' THEN ipmp.ipmp_status END) AS Tooling_PO,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Tooling PO' THEN ipmp.ipmp_start_date END) AS Tooling_PO_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Tooling PO' THEN ipmp.ipmp_end_date END) AS Tooling_PO_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'OTS : Off Tools Sample' THEN ipmp.ipmp_status END) AS OTS_Off_Tools_Sample,
-	MAX(CASE WHEN ipmp.ipmp_name = 'OTS : Off Tools Sample' THEN ipmp.ipmp_start_date END) AS OTS_Off_Tools_Sample_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'OTS : Off Tools Sample' THEN ipmp.ipmp_end_date END) AS OTS_Off_Tools_Sample_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'OTS : Off Tools Sample' THEN ipmp.ipmp_status END) AS OTS_Off_Tools_Sample,
+					MAX(CASE WHEN ipmp.ipmp_name = 'OTS : Off Tools Sample' THEN ipmp.ipmp_start_date END) AS OTS_Off_Tools_Sample_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'OTS : Off Tools Sample' THEN ipmp.ipmp_end_date END) AS OTS_Off_Tools_Sample_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Initial Ppk' THEN ipmp.ipmp_status END) AS Initial_Ppk,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Initial Ppk' THEN ipmp.ipmp_start_date END) AS Initial_Ppk_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Initial Ppk' THEN ipmp.ipmp_end_date END) AS Initial_Ppk_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Initial Ppk' THEN ipmp.ipmp_status END) AS Initial_Ppk,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Initial Ppk' THEN ipmp.ipmp_start_date END) AS Initial_Ppk_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Initial Ppk' THEN ipmp.ipmp_end_date END) AS Initial_Ppk_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'OPS : Off Process Sample' THEN ipmp.ipmp_status END) AS OPS_Off_Process_Sample,
-	MAX(CASE WHEN ipmp.ipmp_name = 'OPS : Off Process Sample' THEN ipmp.ipmp_start_date END) AS OPS_Off_Process_Sample_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'OPS : Off Process Sample' THEN ipmp.ipmp_end_date END) AS OPS_Off_Process_Sample_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'OPS : Off Process Sample' THEN ipmp.ipmp_status END) AS OPS_Off_Process_Sample,
+					MAX(CASE WHEN ipmp.ipmp_name = 'OPS : Off Process Sample' THEN ipmp.ipmp_start_date END) AS OPS_Off_Process_Sample_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'OPS : Off Process Sample' THEN ipmp.ipmp_end_date END) AS OPS_Off_Process_Sample_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Result Ppk Pass' THEN ipmp.ipmp_status END) AS Result_Ppk_Pass,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Result Ppk Pass' THEN ipmp.ipmp_start_date END) AS Result_Ppk_Pass_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Result Ppk Pass' THEN ipmp.ipmp_end_date END) AS Result_Ppk_Pass_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Result Ppk Pass' THEN ipmp.ipmp_status END) AS Result_Ppk_Pass,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Result Ppk Pass' THEN ipmp.ipmp_start_date END) AS Result_Ppk_Pass_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Result Ppk Pass' THEN ipmp.ipmp_end_date END) AS Result_Ppk_Pass_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Pre-R@R' THEN ipmp.ipmp_status END) AS Pre_R_A_R,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Pre-R@R' THEN ipmp.ipmp_start_date END) AS Pre_R_A_R_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Pre-R@R' THEN ipmp.ipmp_end_date END) AS Pre_R_A_R_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Pre-R@R' THEN ipmp.ipmp_status END) AS Pre_R_A_R,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Pre-R@R' THEN ipmp.ipmp_start_date END) AS Pre_R_A_R_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Pre-R@R' THEN ipmp.ipmp_end_date END) AS Pre_R_A_R_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'R@R' THEN ipmp.ipmp_status END) AS R_A_R,
-	MAX(CASE WHEN ipmp.ipmp_name = 'R@R' THEN ipmp.ipmp_start_date END) AS R_A_R_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'R@R' THEN ipmp.ipmp_end_date END) AS R_A_R_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'R@R' THEN ipmp.ipmp_status END) AS R_A_R,
+					MAX(CASE WHEN ipmp.ipmp_name = 'R@R' THEN ipmp.ipmp_start_date END) AS R_A_R_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'R@R' THEN ipmp.ipmp_end_date END) AS R_A_R_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Internal Audit IATF & Safety' THEN ipmp.ipmp_status END) AS Internal_Audit_IATF_Safety,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Internal Audit IATF & Safety' THEN ipmp.ipmp_start_date END) AS Internal_Audit_IATF_Safety_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Internal Audit IATF & Safety' THEN ipmp.ipmp_end_date END) AS Internal_Audit_IATF_Safety_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Internal Audit IATF & Safety' THEN ipmp.ipmp_status END) AS Internal_Audit_IATF_Safety,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Internal Audit IATF & Safety' THEN ipmp.ipmp_start_date END) AS Internal_Audit_IATF_Safety_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Internal Audit IATF & Safety' THEN ipmp.ipmp_end_date END) AS Internal_Audit_IATF_Safety_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'TBKK PPAP Submitt' THEN ipmp.ipmp_status END) AS TBKK_PPAP_Submitt,
-	MAX(CASE WHEN ipmp.ipmp_name = 'TBKK PPAP Submitt' THEN ipmp.ipmp_start_date END) AS TBKK_PPAP_Submitt_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'TBKK PPAP Submitt' THEN ipmp.ipmp_end_date END) AS TBKK_PPAP_Submitt_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'TBKK PPAP Submitt' THEN ipmp.ipmp_status END) AS TBKK_PPAP_Submitt,
+					MAX(CASE WHEN ipmp.ipmp_name = 'TBKK PPAP Submitt' THEN ipmp.ipmp_start_date END) AS TBKK_PPAP_Submitt_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'TBKK PPAP Submitt' THEN ipmp.ipmp_end_date END) AS TBKK_PPAP_Submitt_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Customer Audit ppap' THEN ipmp.ipmp_status END) AS Customer_Audit_ppap,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Customer Audit ppap' THEN ipmp.ipmp_start_date END) AS Customer_Audit_ppap_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Customer Audit ppap' THEN ipmp.ipmp_end_date END) AS Customer_Audit_ppap_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Customer Audit ppap' THEN ipmp.ipmp_status END) AS Customer_Audit_ppap,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Customer Audit ppap' THEN ipmp.ipmp_start_date END) AS Customer_Audit_ppap_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Customer Audit ppap' THEN ipmp.ipmp_end_date END) AS Customer_Audit_ppap_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Customer PPAP Approved' THEN ipmp.ipmp_status END) AS Customer_PPAP_Approved,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Customer PPAP Approved' THEN ipmp.ipmp_start_date END) AS Customer_PPAP_Approved_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Customer PPAP Approved' THEN ipmp.ipmp_end_date END) AS Customer_PPAP_Approved_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Customer PPAP Approved' THEN ipmp.ipmp_status END) AS Customer_PPAP_Approved,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Customer PPAP Approved' THEN ipmp.ipmp_start_date END) AS Customer_PPAP_Approved_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Customer PPAP Approved' THEN ipmp.ipmp_end_date END) AS Customer_PPAP_Approved_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Assessment (Project  Sign-off)' THEN ipmp.ipmp_status END) AS Assessment_Project_Sign_off,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Assessment (Project  Sign-off)' THEN ipmp.ipmp_start_date END) AS Assessment_Project_Sign_off_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Assessment (Project  Sign-off)' THEN ipmp.ipmp_end_date END) AS Assessment_Project_Sign_off_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Assessment (Project  Sign-off)' THEN ipmp.ipmp_status END) AS Assessment_Project_Sign_off,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Assessment (Project  Sign-off)' THEN ipmp.ipmp_start_date END) AS Assessment_Project_Sign_off_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Assessment (Project  Sign-off)' THEN ipmp.ipmp_end_date END) AS Assessment_Project_Sign_off_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'PP : Pre Product' THEN ipmp.ipmp_status END) AS PP_Pre_Product,
-	MAX(CASE WHEN ipmp.ipmp_name = 'PP : Pre Product' THEN ipmp.ipmp_start_date END) AS PP_Pre_Product_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'PP : Pre Product' THEN ipmp.ipmp_end_date END) AS PP_Pre_Product_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'PP : Pre Product' THEN ipmp.ipmp_status END) AS PP_Pre_Product,
+					MAX(CASE WHEN ipmp.ipmp_name = 'PP : Pre Product' THEN ipmp.ipmp_start_date END) AS PP_Pre_Product_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'PP : Pre Product' THEN ipmp.ipmp_end_date END) AS PP_Pre_Product_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'TBKK SOP : Start Of Production' THEN ipmp.ipmp_status END) AS TBKK_SOP_Start_Of_Production,
-	MAX(CASE WHEN ipmp.ipmp_name = 'TBKK SOP : Start Of Production' THEN ipmp.ipmp_start_date END) AS TBKK_SOP_Start_Of_Production_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'TBKK SOP : Start Of Production' THEN ipmp.ipmp_end_date END) AS TBKK_SOP_Start_Of_Production_end_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'TBKK SOP : Start Of Production' THEN ipmp.ipmp_status END) AS TBKK_SOP_Start_Of_Production,
+					MAX(CASE WHEN ipmp.ipmp_name = 'TBKK SOP : Start Of Production' THEN ipmp.ipmp_start_date END) AS TBKK_SOP_Start_Of_Production_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'TBKK SOP : Start Of Production' THEN ipmp.ipmp_end_date END) AS TBKK_SOP_Start_Of_Production_end_date,
 
-	MAX(CASE WHEN ipmp.ipmp_name = 'Initial Control 3 Month' THEN ipmp.ipmp_status END) AS Initial_Control_3_Month,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Initial Control 3 Month' THEN ipmp.ipmp_start_date END) AS Initial_Control_3_Month_start_date,
-	MAX(CASE WHEN ipmp.ipmp_name = 'Initial Control 3 Month' THEN ipmp.ipmp_end_date END) AS Initial_Control_3_Month_end_date
+					MAX(CASE WHEN ipmp.ipmp_name = 'Initial Control 3 Month' THEN ipmp.ipmp_status END) AS Initial_Control_3_Month,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Initial Control 3 Month' THEN ipmp.ipmp_start_date END) AS Initial_Control_3_Month_start_date,
+					MAX(CASE WHEN ipmp.ipmp_name = 'Initial Control 3 Month' THEN ipmp.ipmp_end_date END) AS Initial_Control_3_Month_end_date
 
-FROM info_project_master_plan ipmp
-LEFT JOIN info_project ip ON ip.ip_id = ipmp.ip_id
-GROUP BY
-	ipmp.ip_id,
-	ip.ip_part_no;`
+				FROM info_project_master_plan ipmp
+				LEFT JOIN info_project ip ON ip.ip_id = ipmp.ip_id
+				GROUP BY
+					ipmp.ip_id,
+					ip.ip_part_no;`
 
 	var rows []MasterPlanSummary
 	if err := db.Select(&rows, query); err != nil {

@@ -47,41 +47,55 @@ func Login(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(502).JSON(fiber.Map{"error": "invalid response from auth service", "detail": err.Error()})
 	}
 
-	// Use department fields
+	// Check if status is EXPIRED
+	if extResp.Status == "EXPIRED" {
+		return c.Status(200).JSON(fiber.Map{"status": "EXPIRED"})
+	}
+
+	// Use department fields from external response
+	sdSecCode := extResp.User.DepartmentCode // division maps to sd_sec_code
 	sdName := extResp.User.Department
-	sdCode := extResp.User.DepartmentCode
+	sdCode := extResp.User.Division
+	sdExtensionCode := extResp.User.ExtensionName
+	now := time.Now()
+
+	var suID int64
+	var dbSpg sql.NullInt64
+	var userSdID sql.NullInt64
+	row := db.QueryRowx("SELECT su_id, spg_id, sd_id FROM sys_user WHERE su_username = ? LIMIT 1", extResp.User.Username)
+	userErr := row.Scan(&suID, &dbSpg, &userSdID)
+	if userErr != nil && userErr != sql.ErrNoRows {
+		return c.Status(500).JSON(fiber.Map{"error": "failed to query user", "detail": userErr.Error()})
+	}
 
 	var sdID int64
-	// try find existing department
-	err = db.Get(&sdID, "SELECT sd_id FROM sys_department WHERE sd_name = ? AND sd_code = ? LIMIT 1", sdName, sdCode)
+
+	// Resolve department by sd_sec_code only.
+	err = db.Get(&sdID, "SELECT sd_id FROM sys_department WHERE sd_sec_code = ? LIMIT 1", sdSecCode)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// insert department
-			res, err := db.Exec(`INSERT INTO sys_department (sd_name, sd_code, sd_status, sd_created_at, sd_created_by, sd_updated_at, sd_updated_by) VALUES (?, ?, 'active', ?, ?, ?, ?)`,
-				sdName, sdCode, time.Now(), "system", time.Now(), "system")
-			if err != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "failed to insert department", "detail": err.Error()})
+			res, insErr := db.Exec(`INSERT INTO sys_department (sd_name, sd_sec_name, sd_code, sd_status, sd_created_at, sd_created_by, sd_updated_at, sd_updated_by, sd_sec_code, sd_extention_code) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+				sdName, sdName, sdCode, now, "system", now, "system", sdSecCode, sdExtensionCode)
+			if insErr != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "failed to insert department", "detail": insErr.Error()})
 			}
 			newID, _ := res.LastInsertId()
 			sdID = newID
 		} else {
 			return c.Status(500).JSON(fiber.Map{"error": "failed to query department", "detail": err.Error()})
 		}
+	} else {
+		_, err = db.Exec(`UPDATE sys_department SET sd_name = ?, sd_sec_name = ?, sd_code = ?, sd_extention_code = ?, sd_updated_at = ?, sd_updated_by = ? WHERE sd_id = ?`,
+			sdName, sdName, sdCode, sdExtensionCode, now, "system", sdID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "failed to update department", "detail": err.Error()})
+		}
 	}
-
-	// Upsert user: check if exists by username
-	var suID int64
-	var dbSpg sql.NullInt64
-	now := time.Now()
-
-	// try to read existing user and its spg_id
-	row := db.QueryRowx("SELECT su_id, spg_id, sd_id FROM sys_user WHERE su_username = ? LIMIT 1", extResp.User.Username)
-	err = row.Scan(&suID, &dbSpg, &sdID)
 
 	// default spgID
 	spgID := int64(2)
-	if err != nil {
-		if err == sql.ErrNoRows {
+	if userErr != nil {
+		if userErr == sql.ErrNoRows {
 			// insert new user, use default spgID
 			_, err := db.Exec(`INSERT INTO sys_user (su_username, su_emp_code, su_firstname, su_lastname, su_email, su_status, spg_id, sd_id, su_created_at, su_created_by, su_updated_at, su_updated_by) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
 				extResp.User.Username, extResp.User.EmployeeID, extResp.User.Name, extResp.User.Surname, extResp.User.Email, spgID, sdID, now, extResp.User.EmployeeID, now, extResp.User.EmployeeID)
@@ -89,7 +103,7 @@ func Login(c *fiber.Ctx, db *sqlx.DB) error {
 				return c.Status(500).JSON(fiber.Map{"error": "failed to insert user", "detail": err.Error()})
 			}
 		} else {
-			return c.Status(500).JSON(fiber.Map{"error": "failed to query user", "detail": err.Error()})
+			return c.Status(500).JSON(fiber.Map{"error": "failed to query user", "detail": userErr.Error()})
 		}
 	}
 	// else {

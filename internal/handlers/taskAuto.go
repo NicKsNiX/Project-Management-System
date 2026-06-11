@@ -20,6 +20,26 @@ func CheckAndUpdateDelayStatus(db *sqlx.DB) error {
 			ipid_end_date IS NOT NULL
 			AND ipid_end_date < CURDATE()
 			AND ipid_status NOT IN ('done', 'reject', 'delay')
+			AND (
+				ipid_status <> 'waiting'
+				OR (
+					EXISTS (
+						SELECT 1
+						FROM info_approval ia
+						WHERE ia.ipid_id = info_project_item_detail.ipid_id
+							AND ia.ia_type = 'Leader'
+							AND ia.ia_status = 'waiting'
+							AND ia.ia_status_flg = 'active'
+					)
+					AND NOT EXISTS (
+						SELECT 1
+						FROM info_approval ia
+						WHERE ia.ipid_id = info_project_item_detail.ipid_id
+							AND ia.ia_type = 'PJ'
+							AND ia.ia_status_flg = 'active'
+					)
+				)
+			)
 	`
 
 	result, err := db.Exec(queryDetail)

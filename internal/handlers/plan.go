@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"apiTrackingSystem/internal/utils"
@@ -23,9 +24,9 @@ type SysMasterPlan struct {
 	UpdatedBy         utils.NullString `db:"mmp_updated_by" json:"mmp_updated_by"`
 	UpdateByFirstName utils.NullString `db:"mmp_updated_by_firstname" json:"mmp_updated_by_firstname"`
 	UpdateByLastName  utils.NullString `db:"mmp_updated_by_lastname" json:"mmp_updated_by_lastname"`
-
-	MtID int64 `db:"mt_id" json:"mt_id"`
-	IpID int64 `db:"ip_id" json:"ip_id"`
+	OrderNo           int              `db:"mmp_order_no" json:"mmp_order_no"`
+	MtID              int64            `db:"mt_id" json:"mt_id"`
+	IpID              int64            `db:"ip_id" json:"ip_id"`
 }
 
 // ListMasterPlans returns all master plans
@@ -39,14 +40,15 @@ func ListMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 					   mmp.mmp_updated_at AS mmp_updated_at,
 					   mmp.mmp_updated_by AS mmp_updated_by,
 					   su.su_firstname AS mmp_updated_by_firstname,
-					   su.su_lastname AS mmp_updated_by_lastname
+					   su.su_lastname AS mmp_updated_by_lastname,
+					   mmp.mmp_order_no AS mmp_order_no
 				FROM mst_master_plan mmp
 				LEFT JOIN sys_user su ON mmp_updated_by = su_emp_code
 				RIGHT JOIN mst_master_plan_detail mmpd ON mmpd.mmp_id = mmp.mmp_id
 				LEFT JOIN mst_apqp ma ON mmpd.ma_id = ma.ma_id
 				WHERE mmpd.mmpd_status = 'active'
 				GROUP BY mmp.mmp_id
-				ORDER BY mmp.mmp_id ASC`
+				ORDER BY mmp.mmp_order_no ASC`
 	if err := db.Select(&list, query); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
@@ -62,7 +64,7 @@ func GetMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 
 				WHERE mmp.mmp_status = 'active'
 				GROUP BY mmp.mmp_id
-				ORDER BY mmp.mmp_id ASC`
+				ORDER BY mmp.mmp_order_no ASC`
 	if err := db.Select(&list, query); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
@@ -96,7 +98,12 @@ func InsertMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := tx.Exec(`INSERT INTO mst_master_plan (mmp_name, mmp_type, mmp_status, mmp_created_at, mmp_created_by, mmp_updated_at, mmp_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?)`, body.Name, "text", "active", now, body.CreatedBy, now, body.CreatedBy)
+	var orderNo int
+	if err := tx.Get(&orderNo, `SELECT COALESCE(MAX(mmp_order_no), 0) + 1 FROM mst_master_plan`); err != nil {
+		return c.Status(500).JSON(5)
+	}
+
+	res, err := tx.Exec(`INSERT INTO mst_master_plan (mmp_name, mmp_type, mmp_status, mmp_order_no, mmp_created_at, mmp_created_by, mmp_updated_at, mmp_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, body.Name, "text", "active", orderNo, now, body.CreatedBy, now, body.CreatedBy)
 	if err != nil {
 		return c.Status(500).JSON(5)
 	}
@@ -350,8 +357,12 @@ func GetMasterPlanStep2T(c *fiber.Ctx, db *sqlx.DB) error {
 					AND mtd.mt_id = (SELECT mt_id FROM info_project WHERE ip_id = ?)
 					AND i.ipmp_id IS NULL
 				WHERE m.mmp_status = 'active'
-				ORDER BY m.mmp_id;`
+				ORDER BY mmp_order_no ASC
 
+				;`
+	// CASE WHEN status IS NULL THEN 1 ELSE 0 END,
+	// status DESC,
+	// i.ipmp_id
 	if err := db.Select(&rows, query, ipID, ipID, ipID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
@@ -381,7 +392,7 @@ func GetMasterPlanStep3(c *fiber.Ctx, db *sqlx.DB) error {
 				LEFT JOIN mst_master_plan mmp ON mmp.mmp_name = ipmp.ipmp_name AND mmp.mmp_status = 'active'
 				LEFT JOIN mst_master_plan_detail mmpd ON mmpd.mmp_id = mmp.mmp_id AND mmpd.mmpd_status = 'active'
 				WHERE ipmp.ip_id = ?
-				ORDER BY mmp.mmp_id, mmpd.mmpd_id`
+				ORDER BY mmp.mmp_order_no, mmpd.mmpd_id`
 
 	if err := db.Select(&rows, query, id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
@@ -417,4 +428,86 @@ func GetMasterPlanStep3(c *fiber.Ctx, db *sqlx.DB) error {
 	}
 
 	return c.Status(200).JSON(out)
+}
+
+func GetOrderMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
+	var list []struct {
+		ID      int64  `db:"mmp_id" json:"mmp_id"`
+		Name    string `db:"mmp_name" json:"mmp_name"`
+		OrderNo int    `db:"mmp_order_no" json:"mmp_order_no"`
+	}
+	query := `SELECT mmp_id, mmp_name, mmp_order_no FROM mst_master_plan WHERE mmp_status = 'active' ORDER BY mmp_order_no ASC`
+	if err := db.Select(&list, query); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
+	}
+	return c.Status(200).JSON(list)
+}
+
+func UpdateOrderMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
+	type orderItem struct {
+		ID int64 `json:"mmp_id"`
+	}
+
+	var body []orderItem
+	raw := c.Body()
+	if err := json.Unmarshal(raw, &body); err != nil {
+		var payload struct {
+			Items []orderItem `json:"items"`
+			Data  []orderItem `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return c.Status(400).JSON(fiber.Map{
+				"error":  "invalid request",
+				"detail": err.Error(),
+			})
+		}
+		if len(payload.Items) > 0 {
+			body = payload.Items
+		} else {
+			body = payload.Data
+		}
+	}
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"error":  "failed to start transaction",
+			"detail": err.Error(),
+		})
+	}
+
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	now := time.Now()
+	for index, item := range body {
+
+		orderNo := index + 1
+
+		_, err := tx.Exec(`
+			UPDATE mst_master_plan
+			SET mmp_order_no = ?,
+				mmp_updated_at = ?
+			WHERE mmp_id = ?
+		`, orderNo, now, item.ID)
+
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{
+				"error":  "failed to update order",
+				"detail": err.Error(),
+			})
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"error":  "failed to commit transaction",
+			"detail": err.Error(),
+		})
+	}
+
+	return c.Status(200).JSON(fiber.Map{
+		"message": "update order success",
+	})
 }

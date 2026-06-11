@@ -10,23 +10,25 @@ import (
 
 // SysUser represents the user row we return to the frontend
 type SysUser struct {
-	ID                 int64         `db:"su_id" json:"id"`
-	Aname              string        `db:"sd_dept_aname" json:"department_name"`
-	Username           string        `db:"su_username" json:"username"`
-	EmpCode            string        `db:"su_emp_code" json:"employeeID"`
-	FirstName          string        `db:"su_firstname" json:"firstName"`
-	LastName           string        `db:"su_lastname" json:"lastName"`
-	Email              string        `db:"su_email" json:"email"`
-	Status             string        `db:"su_status" json:"status"`
-	SpgID              int           `db:"spg_id" json:"spg_id"`
-	SpgName            string        `db:"spg_name" json:"spg_name"`
-	SdID               sql.NullInt64 `db:"sd_id" json:"sd_id"`
-	Department         string        `db:"sd_name" json:"department"`
-	UpdatedByFirstName string        `db:"su_firstname_updated_by" json:"updated_by_firstname"`
-	UpdatedByLastName  string        `db:"su_lastname_updated_by" json:"updated_by_lastname"`
-	CreatedAt          *time.Time    `db:"su_created_at" json:"created_at"`
-	UpdatedAt          *time.Time    `db:"su_updated_at" json:"updated_at"`
-	UpdatedBy          string        `db:"su_updated_by" json:"updated_by"`
+	ID                 int64      `db:"su_id" json:"id"`
+	Aname              string     `db:"sd_dept_aname" json:"aname"`
+	Username           string     `db:"su_username" json:"username"`
+	EmpCode            string     `db:"su_emp_code" json:"employeeID"`
+	FirstName          string     `db:"su_firstname" json:"firstName"`
+	LastName           string     `db:"su_lastname" json:"lastName"`
+	Email              string     `db:"su_email" json:"email"`
+	Status             string     `db:"su_status" json:"status"`
+	SpgID              int        `db:"spg_id" json:"spg_id"`
+	SpgName            string     `db:"spg_name" json:"spg_name"`
+	SdID               int        `db:"sd_id" json:"sd_id"`
+	Department         string     `db:"sd_name" json:"department"`
+	SecDepartmentCode  string     `db:"sd_sec_code" json:"sd_sec_code"`
+	SecDepartmentName  string     `db:"sd_sec_name" json:"sd_sec_name"`
+	UpdatedByFirstName string     `db:"su_firstname_updated_by" json:"updated_by_firstname"`
+	UpdatedByLastName  string     `db:"su_lastname_updated_by" json:"updated_by_lastname"`
+	CreatedAt          *time.Time `db:"su_created_at" json:"created_at"`
+	UpdatedAt          *time.Time `db:"su_updated_at" json:"updated_at"`
+	UpdatedBy          string     `db:"su_updated_by" json:"updated_by"`
 }
 
 // GetUser fetches a single user by username and returns JSON to the frontend
@@ -58,6 +60,9 @@ func ListUsers(c *fiber.Ctx, db *sqlx.DB) error {
 					su.su_firstname AS su_firstname,
 					su.su_lastname AS su_lastname,
 					d.sd_name AS sd_name,
+					d.sd_dept_aname AS sd_dept_aname,
+					d.sd_sec_code AS sd_sec_code,
+					d.sd_sec_name AS sd_sec_name,
 					pg.spg_id AS spg_id,
 					pg.spg_name AS spg_name,
 					su.su_status AS su_status,
@@ -162,10 +167,9 @@ func GetUserByDepartment(c *fiber.Ctx, db *sqlx.DB) error {
 				su.su_status AS su_status
 			  FROM sys_user su
 			  LEFT JOIN sys_department sd ON su.sd_id = sd.sd_id
-			  WHERE su.sd_id = ?`
+			  WHERE su.sd_id = ? AND su.su_status = 'active'`
 	if err := db.Select(&users, query, sdID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
 	return c.Status(200).JSON(users)
 }
-						

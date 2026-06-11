@@ -14,6 +14,8 @@ type SysDepartment struct {
 	ID                 int64            `db:"sd_id" json:"sd_id"`
 	Aname              utils.NullString `db:"sd_dept_aname" json:"sd_dept_aname"`
 	Name               utils.NullString `db:"sd_name" json:"sd_name"`
+	SecDepartmentCode  utils.NullString `db:"sd_sec_code" json:"sd_sec_code"`
+	SecDepartmentName  utils.NullString `db:"sd_sec_name" json:"sd_sec_name"`
 	Email              utils.NullString `db:"sd_email" json:"sd_email"`
 	Status             utils.NullString `db:"sd_status" json:"sd_status"`
 	Code               utils.NullString `db:"sd_code" json:"sd_code"`
@@ -34,6 +36,8 @@ func ListDepartments(c *fiber.Ctx, db *sqlx.DB) error {
 				 sd.sd_id AS sd_id,
 				 sd.sd_dept_aname AS sd_dept_aname,
 				 sd_name AS sd_name,
+				 sd_sec_code AS sd_sec_code,
+				 sd_sec_name AS sd_sec_name,
 				 sd_email AS sd_email,
 				 sd_status AS sd_status,
 				 sd_code AS sd_code,
@@ -47,6 +51,7 @@ func ListDepartments(c *fiber.Ctx, db *sqlx.DB) error {
 				 su.su_lastname AS sd_updated_by_lastname
 			  FROM sys_department sd
 			  LEFT JOIN sys_user su ON sd_updated_by = su_emp_code
+			  WHERE sd_status = 'active'
 			  ORDER BY sd_id ASC`
 	if err := db.Select(&departments,
 		query); err != nil {

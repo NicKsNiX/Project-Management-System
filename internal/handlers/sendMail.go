@@ -25,6 +25,8 @@ import (
 // MailData represents email data for project items
 type MailData struct {
 	ProjectCode   sql.NullString `db:"ip_code"`
+	MmpID         sql.NullInt64  `db:"mmp_id"`
+	ApID          sql.NullInt64  `db:"ap_id"`
 	PartName      sql.NullString `db:"ip_part_name"`
 	PartNo        sql.NullString `db:"ip_part_no"`
 	IpModel       sql.NullString `db:"ip_model"`
@@ -33,6 +35,8 @@ type MailData struct {
 	StartDate     sql.NullTime   `db:"start_date"`
 	EndDate       sql.NullTime   `db:"end_date"`
 	IpidStatus    sql.NullString `db:"ipid_status"`
+	IaType        sql.NullString `db:"ia_type"`
+	IaStatus      sql.NullString `db:"ia_status"`
 	OwnerSuIDs    sql.NullString `db:"owner_su_ids"`
 	OwnerNames    sql.NullString `db:"owner_names"`
 	OwnerEmpCodes sql.NullString `db:"owner_emp_codes"`
@@ -330,16 +334,17 @@ func SendMailWithAttachment(to []string, subject, body, contentType, attachmentN
 // applySheetSetup sets column widths for the sheet
 func applySheetSetup(f *excelize.File, sheet string) {
 	_ = f.SetColWidth(sheet, "A", "A", 3.91)
-	_ = f.SetColWidth(sheet, "B", "B", 45.09)
-	_ = f.SetColWidth(sheet, "C", "C", 12.09)
-	_ = f.SetColWidth(sheet, "D", "D", 14.73)
-	_ = f.SetColWidth(sheet, "E", "E", 14.63)
-	_ = f.SetColWidth(sheet, "F", "F", 18)
-	_ = f.SetColWidth(sheet, "G", "G", 25.91)
+	_ = f.SetColWidth(sheet, "B", "B", 10)
+	_ = f.SetColWidth(sheet, "C", "C", 45.09)
+	_ = f.SetColWidth(sheet, "D", "D", 12.09)
+	_ = f.SetColWidth(sheet, "E", "E", 14.73)
+	_ = f.SetColWidth(sheet, "F", "F", 14.63)
+	_ = f.SetColWidth(sheet, "G", "G", 18)
+	_ = f.SetColWidth(sheet, "H", "H", 25.91)
 }
 
 // buildStyles creates and returns style format IDs for the workbook
-func buildStyles(f *excelize.File) (base, title, header, statusDone, statusDelay, statusInprog, statusWaiting, statusReject int, err error) {
+func buildStyles(f *excelize.File) (base, title, header, projectHeader, statusDone, statusDelay, statusInprog, statusWaiting, statusReject int, err error) {
 	// Base style with borders and center alignment
 	base, err = f.NewStyle(&excelize.Style{
 		Border: []excelize.Border{
@@ -347,6 +352,25 @@ func buildStyles(f *excelize.File) (base, title, header, statusDone, statusDelay
 			{Type: "right", Color: "000000", Style: 1},
 			{Type: "top", Color: "000000", Style: 1},
 			{Type: "bottom", Color: "000000", Style: 1},
+		},
+		Alignment: &excelize.Alignment{
+			Horizontal: "center",
+			Vertical:   "center",
+		},
+	})
+	if err != nil {
+		return
+	}
+
+	projectHeader, err = f.NewStyle(&excelize.Style{
+		Border: []excelize.Border{
+			{Type: "left", Color: "000000", Style: 1},
+			{Type: "right", Color: "000000", Style: 1},
+			{Type: "top", Color: "000000", Style: 1},
+			{Type: "bottom", Color: "000000", Style: 1},
+		},
+		Font: &excelize.Font{
+			Bold: true,
 		},
 		Alignment: &excelize.Alignment{
 			Horizontal: "center",
@@ -530,9 +554,9 @@ func buildStyles(f *excelize.File) (base, title, header, statusDone, statusDelay
 
 // buildTitleBlock creates a merged title block at the top of the sheet
 func buildTitleBlock(f *excelize.File, sheet string, titleStyle int) {
-	_ = f.MergeCell(sheet, "B1", "G4")
+	_ = f.MergeCell(sheet, "B1", "H4")
 	_ = f.SetCellValue(sheet, "B1", "Project Management Tracking")
-	_ = f.SetCellStyle(sheet, "B1", "G4", titleStyle)
+	_ = f.SetCellStyle(sheet, "B1", "H4", titleStyle)
 }
 
 // statusStyle returns the appropriate style based on status value
@@ -555,13 +579,23 @@ func statusStyle(status string, done, delay, inprog, waiting, reject, base int) 
 }
 
 // statusDisplayText maps status values to display text
-func statusDisplayText(status string) string {
+func statusDisplayText(status string, iaType string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "waiting":
-		return "Waiting Approve"
+		switch strings.ToLower(strings.TrimSpace(iaType)) {
+		case "leader":
+			return "Waiting Leader Approve"
+		case "pj":
+			return "Waiting PJ Approve"
+		default:
+			return "Waiting Approve"
+		}
 	case "done":
 		return "Done"
 	case "delay":
+		if strings.EqualFold(strings.TrimSpace(iaType), "pj") {
+			return "Waiting PJ Approve"
+		}
 		return "Delay"
 	case "inprogress":
 		return "Inprogress"
@@ -579,66 +613,67 @@ func writeProjectBlock(
 	startRow int,
 	projectCode, partNo, partName, model, template string,
 	rows []MailData,
-	baseStyle, headerStyle, stDone, stDelay, stInprog, stWaiting, stReject int,
+	baseStyle, headerStyle, projectHeaderStyle, stDone, stDelay, stInprog, stWaiting, stReject int,
 ) (nextRow int) {
 
 	r := startRow
 
 	// Create merged cells for project info header
-	_ = f.MergeCell(sheet, fmt.Sprintf("B%d", r), fmt.Sprintf("B%d", r+1))
-	_ = f.MergeCell(sheet, fmt.Sprintf("C%d", r), fmt.Sprintf("E%d", r+1))
-	_ = f.MergeCell(sheet, fmt.Sprintf("F%d", r), fmt.Sprintf("G%d", r+1))
+	_ = f.MergeCell(sheet, fmt.Sprintf("B%d", r), fmt.Sprintf("C%d", r+1))
+	_ = f.MergeCell(sheet, fmt.Sprintf("D%d", r), fmt.Sprintf("F%d", r+1))
+	_ = f.MergeCell(sheet, fmt.Sprintf("G%d", r), fmt.Sprintf("H%d", r+1))
 
 	// Create merged cells for model info
-	_ = f.MergeCell(sheet, fmt.Sprintf("B%d", r+2), fmt.Sprintf("B%d", r+3))
-	_ = f.MergeCell(sheet, fmt.Sprintf("C%d", r+2), fmt.Sprintf("G%d", r+3))
+	_ = f.MergeCell(sheet, fmt.Sprintf("B%d", r+2), fmt.Sprintf("C%d", r+3))
+	_ = f.MergeCell(sheet, fmt.Sprintf("D%d", r+2), fmt.Sprintf("H%d", r+3))
 
 	// Separator row
-	_ = f.MergeCell(sheet, fmt.Sprintf("B%d", r+4), fmt.Sprintf("G%d", r+4))
+	_ = f.MergeCell(sheet, fmt.Sprintf("B%d", r+4), fmt.Sprintf("H%d", r+4))
 
 	// Set header values
 	_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", r), "Project Code : "+projectCode)
-	_ = f.SetCellValue(sheet, fmt.Sprintf("C%d", r), "Part Number : "+partNo)
-	_ = f.SetCellValue(sheet, fmt.Sprintf("F%d", r), "Part Name : "+partName)
+	_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", r), "Part Number : "+partNo)
+	_ = f.SetCellValue(sheet, fmt.Sprintf("G%d", r), "Part Name : "+partName)
 	_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", r+2), "Model : "+model)
-	_ = f.SetCellValue(sheet, fmt.Sprintf("C%d", r+2), "Template : "+template)
+	_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", r+2), "Template : "+template)
 
-	// Apply style to project header block (B5:G9)
-	_ = f.SetCellStyle(sheet, fmt.Sprintf("B%d", r), fmt.Sprintf("G%d", r+4), baseStyle)
+	// Apply style to project header block
+	_ = f.SetCellStyle(sheet, fmt.Sprintf("B%d", r), fmt.Sprintf("H%d", r+4), projectHeaderStyle)
 
 	// Table header row
 	th := r + 5
 	_ = f.SetRowHeight(sheet, th, 24)
 
-	headers := []string{"Item Name", "Item Type", "Start Date", "End Date", "Status", "Pic"}
-	headerCols := []string{"B", "C", "D", "E", "F", "G"}
+	headers := []string{"Phase", "Item Name", "Item Type", "Start Date", "End Date", "Status", "Pic"}
+	headerCols := []string{"B", "C", "D", "E", "F", "G", "H"}
 
 	for cidx, h := range headers {
 		cell := fmt.Sprintf("%s%d", headerCols[cidx], th)
 		_ = f.SetCellValue(sheet, cell, h)
 	}
 
-	_ = f.SetCellStyle(sheet, fmt.Sprintf("B%d", th), fmt.Sprintf("G%d", th), headerStyle)
+	_ = f.SetCellStyle(sheet, fmt.Sprintf("B%d", th), fmt.Sprintf("H%d", th), headerStyle)
 
 	// Data rows
 	dr := th + 1
 	for _, it := range rows {
 		_ = f.SetRowHeight(sheet, dr, 20.5)
 
-		_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", dr), getStringValue(it.ItemName))
-		_ = f.SetCellValue(sheet, fmt.Sprintf("C%d", dr), getStringValue(it.ItemType))
-		_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", dr), getDateValue(it.StartDate))
-		_ = f.SetCellValue(sheet, fmt.Sprintf("E%d", dr), getDateValue(it.EndDate))
-		_ = f.SetCellValue(sheet, fmt.Sprintf("F%d", dr), statusDisplayText(getStringValue(it.IpidStatus)))
-		_ = f.SetCellValue(sheet, fmt.Sprintf("G%d", dr), getStringValue(it.OwnerNames))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", dr), getMmpDisplayValue(it.MmpID))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("C%d", dr), getStringValue(it.ItemName))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", dr), getStringValue(it.ItemType))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("E%d", dr), getDateValue(it.StartDate))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("F%d", dr), getDateValue(it.EndDate))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("G%d", dr), statusDisplayText(getStringValue(it.IpidStatus), getStringValue(it.IaType)))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("H%d", dr), getStringValue(it.OwnerNames))
 
 		// Apply base style to non-status columns
-		_ = f.SetCellStyle(sheet, fmt.Sprintf("B%d", dr), fmt.Sprintf("E%d", dr), baseStyle)
-		_ = f.SetCellStyle(sheet, fmt.Sprintf("G%d", dr), fmt.Sprintf("G%d", dr), baseStyle)
+		_ = f.SetCellStyle(sheet, fmt.Sprintf("B%d", dr), fmt.Sprintf("F%d", dr), baseStyle)
+		_ = f.SetCellStyle(sheet, fmt.Sprintf("H%d", dr), fmt.Sprintf("H%d", dr), baseStyle)
 
 		// Apply status style to Status column
 		st := statusStyle(getStringValue(it.IpidStatus), stDone, stDelay, stInprog, stWaiting, stReject, baseStyle)
-		_ = f.SetCellStyle(sheet, fmt.Sprintf("F%d", dr), fmt.Sprintf("F%d", dr), st)
+		_ = f.SetCellStyle(sheet, fmt.Sprintf("G%d", dr), fmt.Sprintf("G%d", dr), st)
 
 		dr++
 	}
@@ -655,76 +690,111 @@ func writeProjectBlock(
 // both the HTTP handler and the background scheduler.
 func RunSendMailAuto(db *sqlx.DB) error {
 	sqlQuery := `SELECT
-					ip.ip_code,
-					ip.ip_part_name,
-					ip.ip_part_no,
-					ip.ip_model,
-					x.item_name,
-					x.item_type,
-					x.start_date,
-					x.end_date,
-					x.ipid_status,
-					GROUP_CONCAT(DISTINCT x.owner_su_id ORDER BY x.owner_su_id SEPARATOR '/') AS owner_su_ids,
-					GROUP_CONCAT(
-						DISTINCT CONCAT('K.',su.su_firstname)
-						ORDER BY su.su_firstname
-						SEPARATOR '/'
-					) AS owner_names,
-					GROUP_CONCAT(
-						DISTINCT su.su_emp_code
-						ORDER BY su.su_emp_code
-						SEPARATOR '/'
-					) AS owner_emp_codes
-				FROM
-				(
-						SELECT
-							ai.ip_id                                   AS ip_id,
-							ai.iai_name                                AS item_name,
-							pid.ipid_type                              AS item_type,
-							COALESCE(pid.su_id, pid.ipid_line_code)    AS owner_su_id,
-							pid.ipid_start_date                        AS start_date,
-							pid.ipid_end_date                          AS end_date,
-							pid.ipid_id                                AS ipid_id,
-							pid.ipid_status                            AS ipid_status
-						FROM info_project_item_detail pid
-						JOIN info_apqp_item ai
-							ON ai.iai_id = pid.ref_id
-						   AND pid.ipid_type = 'apqp'
+    ip.ip_code,
+	x.mmp_id,
+    ip.ip_part_name,
+    ip.ip_part_no,
+    ip.ip_model,
+    x.item_name,
+    x.item_type,
+    x.start_date,
+    x.end_date,
+    x.ipid_status,
+    x.ia_type,
+    x.ia_status,
+    x.ap_id,
+    GROUP_CONCAT(DISTINCT su.su_id ORDER BY su.su_id SEPARATOR '/') AS owner_su_ids,
+    GROUP_CONCAT(
+        DISTINCT CONCAT('K.', su.su_firstname)
+        ORDER BY su.su_firstname
+        SEPARATOR '/'
+    ) AS owner_names,
+    GROUP_CONCAT(
+        DISTINCT su.su_emp_code
+        ORDER BY su.su_emp_code
+        SEPARATOR '/'
+    ) AS owner_emp_codes
+FROM
+(
+    SELECT
+        ai.ip_id AS ip_id,
+        pid.ref_id AS ref_id,
+        ai.iai_name AS item_name,
+		ai.mpp_id AS mmp_id,
+		ai.iai_id AS ap_id,
+        pid.ipid_type AS item_type,
+        pid.su_id AS owner_su_id,
+        pid.ipid_start_date AS start_date,
+        pid.ipid_end_date AS end_date,
+        pid.ipid_id AS ipid_id,
+        pid.ipid_status AS ipid_status,
+        ia.ia_type AS ia_type,
+        ia.ia_status AS ia_status
+    FROM info_project_item_detail pid
+    JOIN info_apqp_item ai
+        ON ai.iai_id = pid.ref_id
+       AND pid.ipid_type = 'apqp'
+    LEFT JOIN info_approval ia
+        ON ia.ipid_id = pid.ipid_id
+       AND ia.ia_is_action = 1
 
-						UNION ALL
+    UNION ALL
 
-						SELECT
-							pi.ip_id                                   AS ip_id,
-							pi.ipi_name                                AS item_name,
-							pid.ipid_type                              AS item_type,
-							COALESCE(pid.su_id, pid.ipid_line_code)    AS owner_su_id,
-							pid.ipid_start_date                        AS start_date,
-							pid.ipid_end_date                          AS end_date,
-							pid.ipid_id                                AS ipid_id,
-							pid.ipid_status                            AS ipid_status
-						FROM info_project_item_detail pid
-						JOIN info_ppap_item pi
-							ON pi.ipi_id = pid.ref_id
-						   AND pid.ipid_type = 'ppap'
-				) x
-				LEFT JOIN sys_user su
-					ON su.su_id = x.owner_su_id
-				LEFT JOIN info_project ip
-					ON x.ip_id = ip.ip_id
-				GROUP BY
-					ip.ip_code,
-					ip.ip_part_name,
-					ip.ip_part_no,
-					ip.ip_model,
-					x.item_name,
-					x.item_type,
-					x.start_date,
-					x.end_date,
-					x.ipid_status
-				ORDER BY
-					x.item_type ASC,
-					x.start_date ASC,
-					x.item_name ASC`
+    SELECT
+        pi.ip_id AS ip_id,
+        pid.ref_id AS ref_id,
+        pi.ipi_name AS item_name,
+		6 AS mmp_id,
+		pi.ipi_id AS ap_id,
+        pid.ipid_type AS item_type,
+        pid.su_id AS owner_su_id,
+        pid.ipid_start_date AS start_date,
+        pid.ipid_end_date AS end_date,
+        pid.ipid_id AS ipid_id,
+        pid.ipid_status AS ipid_status,
+        ia.ia_type AS ia_type,
+        ia.ia_status AS ia_status
+    FROM info_project_item_detail pid
+    JOIN info_ppap_item pi
+        ON pi.ipi_id = pid.ref_id
+       AND pid.ipid_type = 'ppap'
+    LEFT JOIN info_approval ia
+        ON ia.ipid_id = pid.ipid_id
+       AND ia.ia_is_action = 1
+) x
+LEFT JOIN sys_user su
+    ON su.su_id = x.owner_su_id
+LEFT JOIN info_project ip
+    ON x.ip_id = ip.ip_id
+WHERE x.ipid_status IN ('waiting', 'delay', 'inprogress', 'done', 'reject')
+
+AND NOT (
+    x.ipid_status = 'inprogress'
+    AND EXISTS (
+        SELECT 1
+        FROM info_project_item_detail pid2
+        WHERE pid2.ref_id = x.ref_id
+          AND pid2.ipid_type = x.item_type
+          AND pid2.ipid_status IN ('waiting', 'delay', 'done', 'reject')
+    )
+)
+
+GROUP BY
+    ip.ip_code,
+    ip.ip_part_name,
+    ip.ip_part_no,
+    ip.ip_model,
+	x.mmp_id,
+    x.item_name,
+    x.item_type,
+    x.start_date,
+    x.end_date,
+    x.ipid_status,
+    x.ia_type,
+    x.ia_status
+ORDER BY
+	 x.mmp_id ASC,
+	 x.ap_id ASC;`
 
 	var rows []MailData
 	if err := db.Select(&rows, sqlQuery); err != nil {
@@ -735,23 +805,60 @@ func RunSendMailAuto(db *sqlx.DB) error {
 		return nil
 	}
 
-	// Get all active users with email addresses
-	type User struct {
-		Email string `db:"su_email"`
+	ownerIDs := make([]string, 0)
+	ownerIDSet := make(map[string]struct{})
+	for _, row := range rows {
+		if !row.OwnerSuIDs.Valid {
+			continue
+		}
+		for _, rawID := range strings.Split(row.OwnerSuIDs.String, "/") {
+			ownerID := strings.TrimSpace(rawID)
+			if ownerID == "" || ownerID == "0" || ownerID == "-" {
+				continue
+			}
+			if _, exists := ownerIDSet[ownerID]; exists {
+				continue
+			}
+			ownerIDSet[ownerID] = struct{}{}
+			ownerIDs = append(ownerIDs, ownerID)
+		}
 	}
-	var users []User
-	if err := db.Select(&users, `SELECT su_email FROM sys_user WHERE su_status = 'active' AND su_email IS NOT NULL AND su_email <> '' ORDER BY su_email`); err != nil {
-		return fmt.Errorf("failed to query users: %w", err)
-	}
-	if len(users) == 0 {
-		log.Println("[sendMail] SendMailAuto: no active users with email found")
+	if len(ownerIDs) == 0 {
+		log.Println("[sendMail] SendMailAuto: no owner_su_id values found for department email lookup")
 		return nil
 	}
 
-	// Extract email list
-	emailList := make([]string, 0, len(users))
-	for _, u := range users {
-		emailList = append(emailList, u.Email)
+	type DepartmentEmail struct {
+		Email string `db:"sd_email"`
+	}
+	deptEmailQuery, deptEmailArgs, err := sqlx.In(`
+		SELECT DISTINCT sd.sd_email
+		FROM sys_user su
+		JOIN sys_department sd ON sd.sd_id = su.sd_id
+		WHERE su.su_id IN (?)
+			AND su.su_status = 'active'
+			AND sd.sd_status = 'active'
+			AND sd.sd_email IS NOT NULL
+			AND sd.sd_email <> ''
+		ORDER BY sd.sd_email
+	`, ownerIDs)
+	if err != nil {
+		return fmt.Errorf("failed to build department email query: %w", err)
+	}
+	deptEmailQuery = db.Rebind(deptEmailQuery)
+
+	var deptEmails []DepartmentEmail
+	if err := db.Select(&deptEmails, deptEmailQuery, deptEmailArgs...); err != nil {
+		return fmt.Errorf("failed to query department emails: %w", err)
+	}
+	if len(deptEmails) == 0 {
+		log.Println("[sendMail] SendMailAuto: no department email found for owner_su_id values")
+		return nil
+	}
+
+	emailList := make([]string, 0, len(deptEmails))
+	for _, deptEmail := range deptEmails {
+		emailList = append(emailList, deptEmail.Email)
 	}
 
 	// prepare sheet name sanitizer
@@ -771,7 +878,7 @@ func RunSendMailAuto(db *sqlx.DB) error {
 	f := excelize.NewFile()
 
 	// Build styles upfront
-	baseStyle, titleStyle, headerStyle, stDone, stDelay, stInprog, stWaiting, stReject, err := buildStyles(f)
+	baseStyle, titleStyle, headerStyle, projectHeaderStyle, stDone, stDelay, stInprog, stWaiting, stReject, err := buildStyles(f)
 	if err != nil {
 		return fmt.Errorf("failed to build styles: %w", err)
 	}
@@ -830,7 +937,7 @@ func RunSendMailAuto(db *sqlx.DB) error {
 			first := group[0]
 
 			// Placeholder for template name - fetch from DB if available
-			templateName := "MITSUBISHI MOTOR"
+			templateName := "-"
 
 			// Use helper function to write complete project block
 			currentRow = writeProjectBlock(
@@ -841,7 +948,7 @@ func RunSendMailAuto(db *sqlx.DB) error {
 				getStringValue(first.IpModel),
 				templateName,
 				group,
-				baseStyle, headerStyle,
+				baseStyle, headerStyle, projectHeaderStyle,
 				stDone, stDelay, stInprog, stWaiting, stReject,
 			)
 		}
@@ -851,16 +958,26 @@ func RunSendMailAuto(db *sqlx.DB) error {
 	if _, err := f.WriteTo(&buf); err != nil {
 		return fmt.Errorf("failed to write excel file: %w", err)
 	}
-
-	// Send to all active users
-	subject := "Project Items Awaiting Your Approval"
+	// Send to owner departments
+	subject := "TBKK Project Management Tracking Status"
 	attachName := "TrackingProjects.xlsx"
-	body := "Please find attached the project items in Excel format."
-	if err := SendMailWithAttachment(emailList, subject, body, "text/plain; charset=utf-8", attachName, buf.Bytes()); err != nil {
+	body := `<html>
+<body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f5f7fa;color:#1f2937;">
+	<div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+		<div style="background-color:#ffffff;border-radius:12px;padding:32px;box-shadow:0 4px 16px rgba(15,23,42,0.08);">
+			<p style="margin:0 0 16px 0;font-size:16px;line-height:24px;">Please review the attached file and kindly proceed with the assigned action items.</p>
+			<div style="margin-top:24px;">
+				<a href="http://192.168.161.205:4009/login" style="display:inline-block;padding:12px 24px;background-color:#0d6efd;color:#ffffff;text-decoration:none;border-radius:8px;font-size:15px;font-weight:600;">Open Project Tracking</a>
+			</div>
+		</div>
+	</div>
+</body>
+</html>`
+	if err := SendMailWithAttachment(emailList, subject, body, "text/html; charset=utf-8", attachName, buf.Bytes()); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
 
-	log.Printf("[sendMail] SendMailAuto: email sent to %d recipient(s)", len(emailList))
+	log.Printf("[sendMail] SendMailAuto: email sent to %d department recipient(s)", len(emailList))
 	return nil
 }
 
@@ -869,7 +986,7 @@ func SendMailAuto(c *fiber.Ctx, db *sqlx.DB) error {
 	if err := RunSendMailAuto(db); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.Status(200).JSON(fiber.Map{"success": true, "message": "Email sent to all active users"})
+	return c.Status(200).JSON(fiber.Map{"success": true, "message": "Email sent to owner departments"})
 }
 
 func getStringValue(ns sql.NullString) string {
@@ -884,6 +1001,13 @@ func getDateValue(nt sql.NullTime) string {
 		return nt.Time.Format("2006-01-02")
 	}
 	return "-"
+}
+
+func getMmpDisplayValue(mmpID sql.NullInt64) string {
+	if !mmpID.Valid || mmpID.Int64 == 6 {
+		return ""
+	}
+	return fmt.Sprintf("%d", mmpID.Int64)
 }
 
 func getPicFirstName(first sql.NullString) string {

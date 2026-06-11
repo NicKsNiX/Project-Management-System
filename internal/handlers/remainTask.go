@@ -34,17 +34,6 @@ type RemainTask struct {
 }
 
 func ListRemainTasks(c *fiber.Ctx, db *sqlx.DB) error {
-	// parse optional sd_id query parameter
-	sdStr := strings.TrimSpace(c.Query("sd_id"))
-	var sdParam interface{} = nil
-	if sdStr != "" {
-		if v, err := strconv.ParseInt(sdStr, 10, 64); err == nil {
-			sdParam = v
-		} else {
-			return c.Status(400).JSON(fiber.Map{"error": "invalid sd_id"})
-		}
-	}
-
 	// require su_id query parameter
 	suStr := strings.TrimSpace(c.Query("su_id"))
 	var suParam interface{} = nil
@@ -57,95 +46,42 @@ func ListRemainTasks(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid su_id"})
 	}
 
-	query := `SELECT DISTINCT
-					x.ipid_id,
-					x.ip_code,
-					x.ip_part_no,
-					x.item_name,
-					x.ip_model,
-					 CASE
-                            WHEN a.ia_status IS NULL THEN x.ipid_status
-                            WHEN x.ipid_status = 'waiting' AND a.ia_status = 'approve' THEN a.ia_status
-                            ELSE a.ia_status
-                        END AS status_approve,
-					x.owner_su_id,
+	query := `SELECT
+					ipid.ipid_id,
+					COALESCE(ipa.ip_code, ipp.ip_code) AS ip_code,
+					COALESCE(ipa.ip_part_no, ipp.ip_part_no) AS ip_part_no,
+					COALESCE(iai.iai_name, ipi.ipi_name) AS item_name,
+					COALESCE(ipa.ip_model, ipp.ip_model) AS ip_model,
+					CASE
+						WHEN ia.ia_status IS NULL THEN ipid.ipid_status
+						WHEN ipid.ipid_status = 'waiting' AND ia.ia_status = 'approve' THEN ia.ia_status
+						ELSE ia.ia_status
+					END AS status_approve,
+					ipid.su_id AS owner_su_id,
 					su.su_emp_code,
 					su.su_firstname,
 					su.su_lastname,
-					x.ipid_updated_at,
-					x.itf_file_name,
-					x.itf_file_path
-				FROM
-				(
-						SELECT
-							ai.mpp_id                                  AS mpp_id, 
-							ip.ip_code                                 AS ip_code,
-							ip.ip_part_no                              AS ip_part_no,
-							ip.ip_model                                AS ip_model,
-							ai.iai_name                                AS item_name,
-							pid.ipid_type                              AS item_type,
-							sd.sd_dept_aname                           AS department,
-							pid.su_id                                  AS owner_su_id,
-							ai.iai_created_at                          AS start_date,
-							pid.ipid_updated_at                          AS ipid_updated_at,
-							pid.ipid_id                                AS ipid_id,
-							pid.ipid_status                           AS ipid_status,
-							tf.itf_file_name                           AS itf_file_name,
-							tf.itf_file_path                           AS itf_file_path
-						FROM info_project_item_detail pid
-						JOIN info_apqp_item ai ON ai.iai_id = pid.ref_id AND pid.ipid_type = 'apqp'
-						JOIN sys_department sd ON sd.sd_id = pid.sd_id
-						LEFT JOIN info_project ip ON ip.ip_id = ai.ip_id
-						RIGHT JOIN info_tracking_file tf ON tf.ipid_id = pid.ipid_id
-						WHERE pid.sd_id = ?
-
-						UNION ALL
-
-						SELECT
-							NULL                                       AS mpp_id,                              
-							ip.ip_code                                 AS ip_code,
-							ip.ip_part_no                              AS ip_part_no,
-							ip.ip_model                                AS ip_model,
-							pi.ipi_name                                AS item_name,
-							pid.ipid_type                              AS item_type,
-							sd.sd_dept_aname                           AS department,
-							pid.su_id                                  AS owner_su_id,
-							pi.ipi_created_at                          AS start_date,
-							pid.ipid_updated_at                          AS ipid_updated_at,
-							pid.ipid_id                                AS ipid_id,
-							pid.ipid_status                           AS ipid_status,
-							tf.itf_file_name                           AS itf_file_name,
-							tf.itf_file_path                           AS itf_file_path
-						FROM info_project_item_detail pid
-						JOIN info_ppap_item pi ON pi.ipi_id = pid.ref_id  AND pid.ipid_type = 'ppap'
-						JOIN sys_department sd ON sd.sd_id = pid.sd_id
-						LEFT JOIN info_project ip ON ip.ip_id = pi.ip_id
-						RIGHT JOIN info_tracking_file tf ON tf.ipid_id = pid.ipid_id
-						WHERE pid.sd_id = ?
-							
-				) x
-				LEFT JOIN info_approval a
-					ON a.ia_id = (
-						SELECT ia2.ia_id
-						FROM info_approval ia2
-						WHERE ia2.ipid_id = x.ipid_id
-							AND ia2.su_id = ?
-							AND ia2.ia_type = 'Leader'
-						ORDER BY COALESCE(ia2.ia_updated_at, ia2.ia_created_at) DESC, ia2.ia_id DESC
-						LIMIT 1
-					)
-				LEFT JOIN sys_user su
-					ON su.su_id = x.owner_su_id
-				LEFT JOIN sys_workflow sw 
-				    ON x.owner_su_id = sw.su_id 
-				
+					ipid.ipid_updated_at,
+					itf.itf_file_name,
+					itf.itf_file_path
+				FROM info_approval ia
+				LEFT JOIN info_project_item_detail ipid ON ia.ipid_id = ipid.ipid_id
+				LEFT JOIN info_tracking_file itf ON itf.ipid_id = ipid.ipid_id
+				LEFT JOIN info_apqp_item iai ON ipid.ref_id = iai.iai_id AND ipid.ipid_type = 'apqp'
+				LEFT JOIN info_ppap_item ipi ON ipid.ref_id = ipi.ipi_id AND ipid.ipid_type = 'ppap'
+				LEFT JOIN info_project ipa ON ipa.ip_id = iai.ip_id
+				LEFT JOIN info_project ipp ON ipp.ip_id = ipi.ip_id
+				LEFT JOIN sys_user su ON su.su_id = ipid.su_id
+				WHERE ia.su_id = ?
+					AND ia.ia_status = 'waiting'
+					AND ia.ia_is_action = 1
+					AND ia.ia_status_flg = 'active'
+					AND ia.ia_type = 'Leader'
 				ORDER BY
-					x.ip_code ASC,
-					x.item_type ASC,
-					x.mpp_id ASC;`
+					COALESCE(ipa.ip_code, ipp.ip_code) ASC,
+					ipid.ipid_id ASC;`
 
-	// placeholders: sd_id (apqp), sd_id (ppap), su_id for latest leader approval row
-	args := []interface{}{sdParam, sdParam, suParam}
+	args := []interface{}{suParam}
 
 	var rows []struct {
 		IpidID        int64            `db:"ipid_id" json:"ipid_id"`
@@ -341,6 +277,16 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "failed to update Leader approvals on reject", "detail": err.Error()})
 		}
+
+		// Update ipid_status to 'reject' in info_project_item_detail
+		_, err = tx.Exec(`
+			UPDATE info_project_item_detail
+			SET ipid_status = 'reject', ipid_updated_at = ?, ipid_updated_by = ?
+			WHERE ipid_id = ?
+		`, now, updatedBy, ipidID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "failed to update ipid_status to reject", "detail": err.Error()})
+		}
 	}
 
 	// Update info_approval (priority: action row first, then promote next Leader or insert PJ)
@@ -472,16 +418,17 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 	// After successful commit, send notification emails for specific status changes
 	// Build detail row from info_project_item_detail (join project and item name)
 	var detail struct {
-		ProjectCode sql.NullString `db:"ip_code"`
-		PartNo      sql.NullString `db:"ip_part_no"`
-		PartName    sql.NullString `db:"ip_part_name"`
-		IpModel     sql.NullString `db:"ip_model"`
-		ItemName    sql.NullString `db:"item_name"`
-		ItemType    sql.NullString `db:"item_type"`
-		StartDate   sql.NullTime   `db:"ipid_start_date"`
-		EndDate     sql.NullTime   `db:"ipid_end_date"`
-		Status      sql.NullString `db:"ipid_status"`
-		OwnerSuID   sql.NullInt64  `db:"su_id"`
+		ProjectCode  sql.NullString `db:"ip_code"`
+		PartNo       sql.NullString `db:"ip_part_no"`
+		PartName     sql.NullString `db:"ip_part_name"`
+		IpModel      sql.NullString `db:"ip_model"`
+		TemplateName sql.NullString `db:"mt_name"`
+		ItemName     sql.NullString `db:"item_name"`
+		ItemType     sql.NullString `db:"item_type"`
+		StartDate    sql.NullTime   `db:"ipid_start_date"`
+		EndDate      sql.NullTime   `db:"ipid_end_date"`
+		Status       sql.NullString `db:"ipid_status"`
+		OwnerSuID    sql.NullInt64  `db:"su_id"`
 	}
 
 	q := `SELECT
@@ -489,6 +436,7 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 		ip.ip_part_no,
 		ip.ip_part_name,
 		ip.ip_model,
+		mt.mt_name,
 		COALESCE(ai.iai_name, pi.ipi_name) AS item_name,
 		pid.ipid_type AS item_type,
 		pid.ipid_start_date,
@@ -498,12 +446,17 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 	FROM info_project_item_detail pid
 	LEFT JOIN info_apqp_item ai ON ai.iai_id = pid.ref_id AND pid.ipid_type = 'apqp'
 	LEFT JOIN info_ppap_item pi ON pi.ipi_id = pid.ref_id AND pid.ipid_type = 'ppap'
+	LEFT JOIN mst_template mt ON mt.mt_id = pid.mt_id
 	LEFT JOIN info_project ip ON ip.ip_id = COALESCE(ai.ip_id, pi.ip_id)
 	WHERE pid.ipid_id = ? LIMIT 1`
 
 	if err := db.Get(&detail, q, ipidID); err == nil {
 		// HTML template (full-width plain table)
 		var sb strings.Builder
+		templateName := "-"
+		if name := strings.TrimSpace(getStringValue(detail.TemplateName)); name != "" {
+			templateName = name
+		}
 
 		// handle notifications based on newStatus using a tagged switch
 		switch newStatus {
@@ -552,7 +505,7 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 
 			sb.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px;'>")
 			sb.WriteString("<div style='font-size:12px; color:#374151;'>TEMPLATE</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>MITSUBISHI MOTOR</div>")
+			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(templateName) + "</div>")
 			sb.WriteString("</td>")
 			sb.WriteString("</tr>")
 
@@ -588,7 +541,7 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 			sb.WriteString("</tbody></table>")
 
 			sb.WriteString("<div style='margin-top:20px;'>")
-			sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
+			sb.WriteString("<a href='http://192.168.161.205:4009/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
 			sb.WriteString("</div>")
 
 			sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
@@ -608,73 +561,78 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 			_ = db.Get(&approverFirstName, `SELECT su_firstname FROM sys_user WHERE su_emp_code = ? OR su_id = CAST(? AS UNSIGNED) LIMIT 1`, updatedBy, updatedBy)
 			_ = db.Get(&approverLastName, `SELECT su_lastname FROM sys_user WHERE su_emp_code = ? OR su_id = CAST(? AS UNSIGNED) LIMIT 1`, updatedBy, updatedBy)
 
-			// send to PROJECT CONTROL department users
-			sb.WriteString("<html><body style='font-family: Arial, sans-serif; background:#ffffff; padding:20px;'>")
-			sb.WriteString("<h4>This project item has been <b style='color: #10b981;'>Approved</b> by " + html.EscapeString(getStringValue(approverFirstName)) + " " + html.EscapeString(getStringValue(approverLastName)) + "</h4>")
-			sb.WriteString("<div style='margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:20px;'>")
-			sb.WriteString("<div style='font-size:18px; font-weight:bold; color:#1f2d3d;'>Project Detail</div>")
-			sb.WriteString("<div style='font-size:12px; color:#6b7280;'>Header information for project detail (ข้อมูลของโปรเจค)</div>")
+			buildDoneMailBody := func(title string) string {
+				var body strings.Builder
+				body.WriteString("<html><body style='font-family: Arial, sans-serif; background:#ffffff; padding:20px;'>")
+				body.WriteString(title)
+				body.WriteString("<div style='margin:auto; background:#ffffff; border-radius:10px; border:1px solid #e0e6ed; padding:20px;'>")
+				body.WriteString("<div style='font-size:18px; font-weight:bold; color:#1f2d3d;'>Project Detail</div>")
+				body.WriteString("<div style='font-size:12px; color:#6b7280;'>Header information for project detail (ข้อมูลของโปรเจค)</div>")
 
-			sb.WriteString("<hr style='border:none; border-top:1px dashed #d1d5db; margin:15px 0;'>")
+				body.WriteString("<hr style='border:none; border-top:1px dashed #d1d5db; margin:15px 0;'>")
 
-			sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse;'>")
+				body.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse;'>")
 
-			sb.WriteString("<tr>")
-			sb.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>PROJECT CODE</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>#" + html.EscapeString(getStringValue(detail.ProjectCode)) + "</div>")
-			sb.WriteString("</td>")
+				body.WriteString("<tr>")
+				body.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px;'>")
+				body.WriteString("<div style='font-size:12px; color:#374151;'>PROJECT CODE</div>")
+				body.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>#" + html.EscapeString(getStringValue(detail.ProjectCode)) + "</div>")
+				body.WriteString("</td>")
 
-			sb.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>MODEL</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStringValue(detail.IpModel)) + "</div>")
-			sb.WriteString("</td>")
+				body.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px;'>")
+				body.WriteString("<div style='font-size:12px; color:#374151;'>MODEL</div>")
+				body.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStringValue(detail.IpModel)) + "</div>")
+				body.WriteString("</td>")
 
-			sb.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>TEMPLATE</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>MITSUBISHI MOTOR</div>")
-			sb.WriteString("</td>")
-			sb.WriteString("</tr>")
+				body.WriteString("<td style='width:33%; border:1px solid #e5e7eb; border-radius:8px;'>")
+				body.WriteString("<div style='font-size:12px; color:#374151;'>TEMPLATE</div>")
+				body.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(templateName) + "</div>")
+				body.WriteString("</td>")
+				body.WriteString("</tr>")
 
-			sb.WriteString("<tr>")
-			sb.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NO</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStringValue(detail.PartNo)) + "</div>")
-			sb.WriteString("</td>")
+				body.WriteString("<tr>")
+				body.WriteString("<td style='border:1px solid #e5e7eb; border-radius:8px;'>")
+				body.WriteString("<div style='font-size:12px; color:#374151;'>PART NO</div>")
+				body.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStringValue(detail.PartNo)) + "</div>")
+				body.WriteString("</td>")
 
-			sb.WriteString("<td colspan='2' style='border:1px solid #e5e7eb; border-radius:8px;'>")
-			sb.WriteString("<div style='font-size:12px; color:#374151;'>PART NAME</div>")
-			sb.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStringValue(detail.PartName)) + "</div>")
-			sb.WriteString("</td>")
-			sb.WriteString("</tr>")
+				body.WriteString("<td colspan='2' style='border:1px solid #e5e7eb; border-radius:8px;'>")
+				body.WriteString("<div style='font-size:12px; color:#374151;'>PART NAME</div>")
+				body.WriteString("<div style='font-size:14px; font-weight:bold; color:#2563eb;'>" + html.EscapeString(getStringValue(detail.PartName)) + "</div>")
+				body.WriteString("</td>")
+				body.WriteString("</tr>")
 
-			sb.WriteString("</table>")
-			sb.WriteString("<div style='margin-top:20px; font-size:14px; color:#374151;'>")
-			sb.WriteString("</div>")
-			sb.WriteString("</div><br>")
+				body.WriteString("</table>")
+				body.WriteString("<div style='margin-top:20px; font-size:14px; color:#374151;'></div>")
+				body.WriteString("</div><br>")
 
-			sb.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse; border:1px solid #e5e7eb;'>")
-			sb.WriteString("<thead><tr style='background:#f3f4f6; border-bottom:2px solid #d1d5db;'>")
-			cols := []string{"Item Name", "Item Type", "Start Date", "End Date"}
-			for _, c := range cols {
-				sb.WriteString("<th>" + html.EscapeString(c) + "</th>")
+				body.WriteString("<table width='100%' cellpadding='10' cellspacing='0' style='border-collapse:collapse; border:1px solid #e5e7eb;'>")
+				body.WriteString("<thead><tr style='background:#f3f4f6; border-bottom:2px solid #d1d5db;'>")
+				cols := []string{"Item Name", "Item Type", "Start Date", "End Date"}
+				for _, c := range cols {
+					body.WriteString("<th>" + html.EscapeString(c) + "</th>")
+				}
+				body.WriteString("</tr></thead><tbody><tr>")
+				vals := []string{getStringValue(detail.ItemName), getStringValue(detail.ItemType), getDateValue(detail.StartDate), getDateValue(detail.EndDate)}
+				for _, v := range vals {
+					body.WriteString("<td>" + html.EscapeString(v) + "</td>")
+				}
+				body.WriteString("</tr></tbody></table>")
+
+				body.WriteString("<div style='margin-top:20px;'>")
+				body.WriteString("<a href='http://192.168.161.205:4009/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
+				body.WriteString("</div>")
+
+				body.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
+				body.WriteString("<p>Best Regards,<br><strong>System Service Department</strong></p>")
+				body.WriteString("</div>")
+
+				body.WriteString("</body></html>")
+				return body.String()
 			}
-			sb.WriteString("</tr></thead><tbody><tr>")
-			vals := []string{getStringValue(detail.ItemName), getStringValue(detail.ItemType), getDateValue(detail.StartDate), getDateValue(detail.EndDate)}
-			for _, v := range vals {
-				sb.WriteString("<td>" + html.EscapeString(v) + "</td>")
-			}
-			sb.WriteString("</tr></tbody></table>")
 
-			sb.WriteString("<div style='margin-top:20px;'>")
-			sb.WriteString("<a href='http://192.168.161.205:4005/login' style='display:inline-block; padding:10px 20px; background:#2563eb; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;'>Open Project Management</a>")
-			sb.WriteString("</div>")
-
-			sb.WriteString("<div style='margin-top:30px; padding-top:20px; border-top:1px solid #e5e7eb; font-size:13px; color:#6b7280;'>")
-			sb.WriteString("<p>Best Regards,<br><strong>System Service Department</strong></p>")
-			sb.WriteString("</div>")
-
-			sb.WriteString("</body></html>")
+			ownerMailContent := buildDoneMailBody("<h4>This project item has been <b style='color: #10b981;'>Approved</b> by " + html.EscapeString(getStringValue(approverFirstName)) + " " + html.EscapeString(getStringValue(approverLastName)) + "</h4>")
+			pjMailContent := buildDoneMailBody("<h4>You have project to <b style='color: #10b981;'>Approve</b></h4>")
 
 			// Send email to PJ (ipid_created_by)
 			var pjData []struct {
@@ -690,7 +648,7 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 						`<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>` +
 							`Dear, K.` + html.EscapeString(pj.FirstName) + `<br><br>` +
 							`</h3>` +
-							sb.String()
+							pjMailContent
 					pjToEmail := strings.TrimSpace(pj.Email)
 					var pjCCEmails []string
 					if pj.SdID.Valid {
@@ -731,7 +689,7 @@ func UpdateStatusFileProject(c *fiber.Ctx, db *sqlx.DB) error {
 						`<h3 style='font-family: Arial, sans-serif; color:#1f2d3d;'>` +
 							`Dear, K.` + html.EscapeString(getStringValue(ownerFirstName)) + `<br><br>` +
 							`</h3>` +
-							sb.String()
+							ownerMailContent
 					ownerToEmail := strings.TrimSpace(ownerEmail.String)
 					var ownerCCEmails []string
 					var ownerSdID sql.NullInt64

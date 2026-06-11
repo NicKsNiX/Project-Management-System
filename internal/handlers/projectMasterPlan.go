@@ -13,6 +13,7 @@ import (
 type SysProjectMasterPlan struct {
 	IpmpID    int64            `db:"ipmp_id" json:"ipmp_id"`
 	IpID      int64            `db:"ip_id" json:"ip_id"`
+	OrderNo   int64            `db:"ipmp_order_no" json:"ipmp_order_no"`
 	Name      utils.NullString `db:"ipmp_name" json:"ipmp_name"`
 	Date      *Date            `db:"ipmp_date" json:"ipmp_date"`
 	StartDate *Date            `db:"ipmp_start_date" json:"ipmp_start_date"`
@@ -26,13 +27,13 @@ type SysProjectMasterPlan struct {
 // ListProjectMasterPlans returns master plans, optional filter by ip_id
 func ListProjectMasterPlans(c *fiber.Ctx, db *sqlx.DB) error {
 	ipID := c.Query("ip_id")
-	query := `SELECT ipmp_id, ip_id, ipmp_name, ipmp_date, ipmp_start_date, ipmp_end_date, ipmp_type, ipmp_status, ipmp_created_at, ipmp_created_by FROM info_project_master_plan WHERE 1=1`
+	query := `SELECT ipmp_id, ip_id, ipmp_order_no, ipmp_name, ipmp_date, ipmp_start_date, ipmp_end_date, ipmp_type, ipmp_status, ipmp_created_at, ipmp_created_by FROM info_project_master_plan WHERE 1=1`
 	args := []interface{}{}
 	if ipID != "" {
 		query += " AND ip_id = ?"
 		args = append(args, ipID)
 	}
-	query += " ORDER BY ipmp_id ASC"
+	query += " ORDER BY ipmp_order_no ASC, ipmp_id ASC"
 
 	var list []SysProjectMasterPlan
 	if err := db.Select(&list, query, args...); err != nil {
@@ -48,7 +49,7 @@ func GetProjectMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 		return c.Status(400).JSON(fiber.Map{"error": "id required"})
 	}
 	var item SysProjectMasterPlan
-	if err := db.Get(&item, `SELECT ipmp_id, ip_id, ipmp_name, ipmp_date, ipmp_start_date, ipmp_end_date, ipmp_type, ipmp_status, ipmp_created_at, ipmp_created_by FROM info_project_master_plan WHERE ipmp_id = ?`, id); err != nil {
+	if err := db.Get(&item, `SELECT ipmp_id, ip_id, ipmp_order_no, ipmp_name, ipmp_date, ipmp_start_date, ipmp_end_date, ipmp_type, ipmp_status, ipmp_created_at, ipmp_created_by FROM info_project_master_plan WHERE ipmp_id = ?`, id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
 	return c.Status(200).JSON(item)
@@ -77,9 +78,9 @@ func InsertProjectMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 
 	insertQuery := `
 		INSERT INTO info_project_master_plan
-			(ip_id, ipmp_name, ipmp_date, ipmp_start_date, ipmp_end_date, ipmp_type, ipmp_status, ipmp_created_at, ipmp_created_by)
+			(ip_id, ipmp_order_no, ipmp_name, ipmp_date, ipmp_start_date, ipmp_end_date, ipmp_type, ipmp_status, ipmp_created_at, ipmp_created_by)
 		VALUES
-			(:ip_id, :ipmp_name, :ipmp_date, :ipmp_start_date, :ipmp_end_date, :ipmp_type, :ipmp_status, :ipmp_created_at, :ipmp_created_by)
+			(:ip_id, :ipmp_order_no, :ipmp_name, :ipmp_date, :ipmp_start_date, :ipmp_end_date, :ipmp_type, :ipmp_status, :ipmp_created_at, :ipmp_created_by)
 	`
 
 	ids := []int64{}
@@ -105,13 +106,15 @@ func InsertProjectMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 		// fetch existing rows for this ip_id
 		var existingRows []struct {
 			ID        int64            `db:"ipmp_id"`
+			OrderNo   int64            `db:"ipmp_order_no"`
 			Name      utils.NullString `db:"ipmp_name"`
+			Date      *Date            `db:"ipmp_date"`
 			StartDate *Date            `db:"ipmp_start_date"`
 			EndDate   *Date            `db:"ipmp_end_date"`
 		}
 
 		if err := tx.Select(&existingRows,
-			`SELECT ipmp_id, ipmp_name, ipmp_start_date, ipmp_end_date FROM info_project_master_plan WHERE ip_id = ?`,
+			`SELECT ipmp_id, ipmp_order_no, ipmp_name, ipmp_date, ipmp_start_date, ipmp_end_date FROM info_project_master_plan WHERE ip_id = ? ORDER BY ipmp_order_no ASC, ipmp_id ASC`,
 			ipID,
 		); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "query existing failed", "detail": err.Error()})
@@ -119,16 +122,24 @@ func InsertProjectMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 
 		// map existing by name (ทำ map ของข้อมูลเดิมตาม name)
 		existingMap := map[string]struct {
-			ID    int64
-			Start *Date
-			End   *Date
+			ID      int64
+			OrderNo int64
+			Date    *Date
+			Start   *Date
+			End     *Date
 		}{}
+		maxOrderNo := int64(0)
 		for _, e := range existingRows {
+			if e.OrderNo > maxOrderNo {
+				maxOrderNo = e.OrderNo
+			}
 			existingMap[e.Name.StringValue()] = struct {
-				ID    int64
-				Start *Date
-				End   *Date
-			}{ID: e.ID, Start: e.StartDate, End: e.EndDate}
+				ID      int64
+				OrderNo int64
+				Date    *Date
+				Start   *Date
+				End     *Date
+			}{ID: e.ID, OrderNo: e.OrderNo, Date: e.Date, Start: e.StartDate, End: e.EndDate}
 		}
 
 		// dedupe incoming names and preserve order (ตัดซ้ำตาม name และเก็บลำดับ)
@@ -146,54 +157,30 @@ func InsertProjectMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 		}
 
-		// check overlap (เช็คว่าชื่อที่ส่งมาซ้ำกับของเดิมกี่รายการ)
-		overlapCount := 0
-		for name := range incomingSet {
-			if _, ok := existingMap[name]; ok {
-				overlapCount++
-			}
+		equalPlan := func(ex struct {
+			ID      int64
+			OrderNo int64
+			Date    *Date
+			Start   *Date
+			End     *Date
+		}, it SysProjectMasterPlan) bool {
+			return equalDates(ex.Date, it.Date) &&
+				equalDates(ex.Start, it.StartDate) &&
+				equalDates(ex.End, it.EndDate)
 		}
 
-		// if there are existing rows and no overlap -> replace (delete then insert)
-		// ถ้ามีของเดิม และชื่อที่ส่งมา "ไม่ทับ" เลย => replace ทั้งชุด
-		if len(existingRows) > 0 && overlapCount == 0 {
-			if _, err := tx.Exec(`DELETE FROM info_project_master_plan WHERE ip_id = ?`, ipID); err != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "delete failed", "detail": err.Error()})
-			}
+		firstInsert := len(existingRows) == 0
 
-			for _, name := range incomingOrder {
-				it := incomingSet[name]
-				params := map[string]any{
-					"ip_id":           it.IpID,
-					"ipmp_name":       it.Name,
-					"ipmp_date":       it.Date,
-					"ipmp_start_date": it.StartDate,
-					"ipmp_end_date":   it.EndDate,
-					"ipmp_type":       "dateRange",
-					"ipmp_status":     "inprogress",
-					"ipmp_created_at": now,
-					"ipmp_created_by": it.CreatedBy,
-				}
-
-				res, err := tx.NamedExec(insertQuery, params)
-				if err != nil {
-					return c.Status(500).JSON(fiber.Map{"error": "insert failed", "detail": err.Error()})
-				}
-				id, _ := res.LastInsertId()
-				ids = append(ids, id)
-			}
-
-			// IMPORTANT: if replace whole set, no need to "delete missing" again (กรณี replace ไม่ต้องลบซ้ำ)
-			continue
-		}
-
-		// otherwise: upsert by name (ไม่ replace: insert เฉพาะใหม่ + update ถ้าวันเปลี่ยน)
+		// upsert by name:
+		// - first time insert => all rows get order no = 1
+		// - same data => do nothing
+		// - new rows on later calls => insert only new rows with next order no
 		for _, name := range incomingOrder {
 			it := incomingSet[name]
 
 			if ex, ok := existingMap[name]; ok {
-				// exists: update if dates changed (มีอยู่แล้ว: update ถ้าวันเปลี่ยน)
-				if !equalDates(ex.Start, it.StartDate) || !equalDates(ex.End, it.EndDate) {
+				// same data => skip, changed data => update but keep existing order no
+				if !equalPlan(ex, it) {
 					params := map[string]any{
 						"ipmp_id":         ex.ID,
 						"ipmp_date":       it.Date,
@@ -220,9 +207,18 @@ func InsertProjectMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 				continue
 			}
 
+			orderNo := int64(1)
+			if !firstInsert && maxOrderNo > 0 {
+				orderNo = maxOrderNo + 1
+			}
+			if orderNo > maxOrderNo {
+				maxOrderNo = orderNo
+			}
+
 			// insert new (เพิ่มใหม่)
 			params := map[string]any{
 				"ip_id":           it.IpID,
+				"ipmp_order_no":   orderNo,
 				"ipmp_name":       it.Name,
 				"ipmp_date":       it.Date,
 				"ipmp_start_date": it.StartDate,
@@ -239,28 +235,6 @@ func InsertProjectMasterPlan(c *fiber.Ctx, db *sqlx.DB) error {
 			}
 			id, _ := res.LastInsertId()
 			ids = append(ids, id)
-		}
-
-		// ✅ FIXED: delete existing rows that were not sent in the incoming list (per ip_id)
-		// ✅ แก้แล้ว: ย้ายมาลบใน loop ของ ipID นี้เท่านั้น
-		incomingNamesNorm := map[string]bool{}
-		for n := range incomingSet {
-			nn := strings.ToLower(strings.TrimSpace(n))
-			if nn != "" {
-				incomingNamesNorm[nn] = true
-			}
-		}
-
-		for en, ex := range existingMap {
-			enn := strings.ToLower(strings.TrimSpace(en))
-			if enn == "" {
-				continue
-			}
-			if !incomingNamesNorm[enn] {
-				if _, err := tx.Exec(`DELETE FROM info_project_master_plan WHERE ipmp_id = ?`, ex.ID); err != nil {
-					return c.Status(500).JSON(5)
-				}
-			}
 		}
 	}
 

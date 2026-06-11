@@ -64,6 +64,8 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Get("/apiTrackingSystem/masterPlan/GetMasterPlanStep2", func(c *fiber.Ctx) error { return handlers.GetMasterPlanStep2(c, db) })
 	app.Get("/apiTrackingSystem/masterPlan/GetMasterPlanStep2T", func(c *fiber.Ctx) error { return handlers.GetMasterPlanStep2T(c, db) })
 	app.Get("/apiTrackingSystem/masterPlan/GetMasterPlanStep3", func(c *fiber.Ctx) error { return handlers.GetMasterPlanStep3(c, db) })
+	app.Get("/apiTrackingSystem/masterPlan/GetOrderMasterPlan", func(c *fiber.Ctx) error { return handlers.GetOrderMasterPlan(c, db) })
+	app.Post("/apiTrackingSystem/masterPlan/UpdateOrderMasterPlan", func(c *fiber.Ctx) error { return handlers.UpdateOrderMasterPlan(c, db) })
 
 	app.Get("/apiTrackingSystem/manageTemplate/ListTemplateDetails", func(c *fiber.Ctx) error { return handlers.ListTemplateDetails(c, db) })
 	app.Get("/apiTrackingSystem/manageTemplate/SelectTemplate", func(c *fiber.Ctx) error { return handlers.SelectTemplate(c, db) })
@@ -155,6 +157,7 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Post("/apiTrackingSystem/remainTask/UpdateStatusFileProject", func(c *fiber.Ctx) error { return handlers.UpdateStatusFileProject(c, db) })
 
 	app.Get("/apiTrackingSystem/sendMail/SendMailAuto", func(c *fiber.Ctx) error { return handlers.SendMailAuto(c, db) })
+	app.Get("/apiTrackingSystem/sendMail/SendMailNoraphatTest", func(c *fiber.Ctx) error { return handlers.SendMailNoraphatTest(c, db) })
 
 	app.Get("/apiTrackingSystem/dashboard/ListInprogressProjects", func(c *fiber.Ctx) error { return handlers.ListInprogressProjects(c, db) })
 	app.Get("/apiTrackingSystem/dashboard/MasterPlanSummary", func(c *fiber.Ctx) error { return handlers.ListMasterPlanSummary(c, db) })
@@ -165,10 +168,11 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Static("/uploads", `C:\inetpub\wwwroot\apiTrackingSystemUat\uploads`)
 }
 
-// http://192.168.161.219:9004/apiTrackingSystem/manageProject/UpdateInfoProject
+// http://192.168.161.219:9004/apiTrackingSystem/users
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/InsertCustomerEvent
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEvent
 // http://192.168.161.219:9004/apiTrackingSystem/manageEvent/UpdateCustomerEventStatus
+
 // docker compose down
 // docker compose up -d --build
 // set GOOS=windows GOARCH=amd64 && go build -o apiTracking.exe .

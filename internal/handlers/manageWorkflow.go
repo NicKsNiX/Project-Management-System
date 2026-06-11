@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"database/sql"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -33,7 +33,7 @@ type SysWorkflow struct {
 }
 
 func ListWorkflow(c *fiber.Ctx, db *sqlx.DB) error {
-	sdID := c.Query("sd_id")
+	sdID := c.Query("sd_name")
 	var res []SysWorkflow
 	query := `  SELECT sw_id AS sw_id,
 					 sw.sd_id AS sd_id,
@@ -56,7 +56,7 @@ func ListWorkflow(c *fiber.Ctx, db *sqlx.DB) error {
 				`
 	var err error
 	if sdID != "" {
-		query += ` WHERE sw.sd_id = ? ORDER BY sw.sw_order ASC`
+		query += ` WHERE sd.sd_name = ? ORDER BY sw.sw_order ASC`
 		err = db.Select(&res, query, sdID)
 	} else {
 		query += ` ORDER BY sw.sw_order ASC`
@@ -184,12 +184,19 @@ func UpdateWorkflowStatus(c *fiber.Ctx, db *sqlx.DB) error {
 
 func SelectDepartmentMW(c *fiber.Ctx, db *sqlx.DB) error {
 	var departments []struct {
-		ID   int64            `db:"sd_id" json:"sd_id"`
-		Name utils.NullString `db:"sd_name" json:"sd_name"`
-		Dept utils.NullString `db:"sd_dept_aname" json:"sd_dept_aname"`
+		ID          int64            `db:"sd_id" json:"sd_id"`
+		Name        utils.NullString `db:"sd_name" json:"sd_name"`
+		Dept        utils.NullString `db:"sd_dept_aname" json:"sd_dept_aname"`
+		SecDeptCode utils.NullString `db:"sd_sec_code" json:"sd_sec_code"`
+		SecDeptName utils.NullString `db:"sd_sec_name" json:"sd_sec_name"`
 	}
-
-	query := `SELECT sd_id AS sd_id, sd_name AS sd_name, sd_dept_aname AS sd_dept_aname FROM sys_department WHERE sd_status = 'active' ORDER BY sd_name ASC`
+	query := `SELECT sd_id AS sd_id,
+					sd_name AS sd_name,
+					sd_dept_aname AS sd_dept_aname,
+					sd_sec_code AS sd_sec_code,
+					sd_sec_name AS sd_sec_name
+				FROM sys_department
+				WHERE sd_status = 'active' ORDER BY sd_name ASC`
 	if err := db.Select(&departments, query); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
@@ -204,17 +211,23 @@ func SelectUserMW(c *fiber.Ctx, db *sqlx.DB) error {
 		SdID         int64            `db:"sd_id" json:"sd_id"`
 		EmployeeCode utils.NullString `db:"su_emp_code" json:"su_emp_code"`
 	}
-	sdIDStr := c.Query("sd_id")
-	if sdIDStr == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "sd_id query parameter is required"})
-	}
-	sdID, err := strconv.ParseInt(sdIDStr, 10, 64)
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "sd_id must be a number", "detail": err.Error()})
+	sdName := strings.TrimSpace(c.Query("sd_name"))
+	if sdName == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "sd_name query parameter is required"})
 	}
 
-	query := `SELECT su_id AS su_id, su_firstname AS su_firstname, su_lastname AS su_lastname, sd_id AS sd_id, su_emp_code AS su_emp_code FROM sys_user WHERE su_status = 'active' AND sd_id = ? ORDER BY su_firstname ASC, su_lastname ASC`
-	if err := db.Select(&users, query, sdID); err != nil {
+	query := `SELECT DISTINCT
+				su.su_id AS su_id,
+				su.su_firstname AS su_firstname,
+				su.su_lastname AS su_lastname,
+				su.sd_id AS sd_id,
+				su.su_emp_code AS su_emp_code
+			FROM sys_user su
+			JOIN sys_department sd ON su.sd_id = sd.sd_id
+			WHERE su.su_status = 'active'
+			  AND sd.sd_name = ?
+			ORDER BY su.su_firstname ASC, su.su_lastname ASC`
+	if err := db.Select(&users, query, sdName); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})
 	}
 	return c.Status(200).JSON(users)
