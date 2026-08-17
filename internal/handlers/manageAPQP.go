@@ -539,3 +539,5 @@ ORDER BY ma.mpp_id, ma.ma_id ASC;
 
 	return c.JSON(list)
 }
+func GetAPQPDetail() {
+}
