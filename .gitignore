@@ -68,5 +68,9 @@ config.local.json
 
 # Miscellaneous
 .cache/
+.gocache/
 *.DS_Store
 node_modules/
+.env
+apiWebPorta
+go

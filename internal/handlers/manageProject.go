@@ -330,7 +330,7 @@ func ListInfoProjects(c *fiber.Ctx, db *sqlx.DB) error {
 				LEFT JOIN sys_user su ON ip_updated_by = su_emp_code
 				LEFT JOIN info_pos_file ipf ON info_project.ip_id = ipf.ip_id
 				LEFT JOIN mst_template mt ON info_project.mt_id = mt.mt_id
-				LEFT JOIN mst_model_master mmm ON info_project.ip_customer_name = mmm.mmm_customer_name
+				LEFT JOIN mst_model_master mmm ON mmm.mmm_customer_name = info_project.ip_customer_name AND mmm.mmm_model = info_project.ip_model
 				LEFT JOIN (
                     SELECT 
                         ip_id,
@@ -2336,7 +2336,7 @@ func CustomerEventGanttChart(c *fiber.Ctx, db *sqlx.DB) error {
 		"LEFT JOIN sys_user su ON ip.ip_created_by = su.su_emp_code " +
 		"WHERE ice.ip_id = ? " +
 		"AND ice.ice_start_date IS NOT NULL " +
-		"ORDER BY mce.mce_name"
+		"ORDER BY ice.ice_start_date"
 
 	if err := db.Select(&out, query, ipID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "query error", "detail": err.Error()})

@@ -158,7 +158,7 @@ func CountProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					ON ip.ip_id = ipi.ip_id
 				WHERE ipid.su_id = ?
 					AND (ipid.ipid_status = 'inprogress' OR ipid.ipid_status = 'delay' OR ipid.ipid_status = 'reject')
-					AND ipid.ipid_status_flg IS NOT NULL
+					AND ipid.ipid_status_flg IS NOT NULL AND ipid.ipid_status_flg != 'draft'
 					AND ipid.ipid_type = 'ppap'
 
 				UNION
@@ -172,7 +172,7 @@ func CountProjectTracking(c *fiber.Ctx, db *sqlx.DB) error {
 					ON ip.ip_id = iai.ip_id
 				WHERE ipid.su_id = ?
 					AND (ipid.ipid_status = 'inprogress' OR ipid.ipid_status = 'delay' OR ipid.ipid_status = 'reject')
-					AND ipid.ipid_status_flg IS NOT NULL
+					AND ipid.ipid_status_flg IS NOT NULL AND ipid.ipid_status_flg != 'draft'
 					AND ipid.ipid_type = 'apqp'
 				) t;
 

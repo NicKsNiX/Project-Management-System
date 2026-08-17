@@ -65,7 +65,7 @@ func ListAPQP(c *fiber.Ctx, db *sqlx.DB) error {
 		query += " AND mpp_id = ?"
 		args = append(args, mppID)
 	}
-	query += " AND mad.mad_status = 'active' GROUP BY mst_apqp.ma_id ORDER BY ma_id ASC"
+	query += " AND mad.mad_status = 'active' GROUP BY mst_apqp.ma_id ORDER BY mpp_order ASC"
 
 	var apqps []SysAPQP
 	var err error

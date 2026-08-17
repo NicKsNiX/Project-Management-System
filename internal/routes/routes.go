@@ -115,6 +115,8 @@ func Setup(app *fiber.App, db *sqlx.DB) {
 	app.Post("/apiTrackingSystem/manageModel/UpdateModelMaster", func(c *fiber.Ctx) error { return handlers.UpdateModelMaster(c, db) })
 	app.Post("/apiTrackingSystem/manageModel/UpdateModelMasterStatus", func(c *fiber.Ctx) error { return handlers.UpdateModelMasterStatus(c, db) })
 
+	app.Get("/apiTrackingSystem/manageCustomer/ListCustomers", func(c *fiber.Ctx) error { return handlers.ListCustomers(c, db) })
+
 	app.Get("/apiTrackingSystem/manageEvent/ListCustomerEvents", func(c *fiber.Ctx) error { return handlers.ListCustomerEvents(c, db) })
 	app.Post("/apiTrackingSystem/manageEvent/InsertCustomerEvent", func(c *fiber.Ctx) error { return handlers.InsertCustomerEvent(c, db) })
 	app.Post("/apiTrackingSystem/manageEvent/UpdateCustomerEvent", func(c *fiber.Ctx) error { return handlers.UpdateCustomerEvent(c, db) })

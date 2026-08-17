@@ -20,4 +20,3 @@ func MustOpen(cfg config.Config) *sqlx.DB {
 
 	return db
 }
-

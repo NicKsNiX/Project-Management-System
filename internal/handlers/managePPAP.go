@@ -947,8 +947,8 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 
 	now := time.Now()
 
-	markAPQPNullStatusAsDraft := func() error {
-		_, err := tx.Exec(`
+	markProjectItemDetailsAsDraft := func() error {
+		if _, err := tx.Exec(`
 			UPDATE info_project_item_detail ipid
 			JOIN info_apqp_item iai ON iai.iai_id = ipid.ref_id
 			SET ipid.ipid_status_flg = 'draft',
@@ -957,13 +957,26 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 			WHERE iai.ip_id = ?
 			  AND ipid.ipid_type = 'apqp'
 			  AND ipid.ipid_status_flg IS NULL
+		`, now, body.CreatedBy, body.IpID); err != nil {
+			return err
+		}
+
+		_, err := tx.Exec(`
+			UPDATE info_project_item_detail ipid
+			JOIN info_ppap_item ipi ON ipi.ipi_id = ipid.ref_id
+			SET ipid.ipid_status_flg = 'draft',
+				ipid.ipid_updated_at = ?,
+				ipid.ipid_updated_by = ?
+			WHERE ipi.ip_id = ?
+			  AND ipid.ipid_type = 'ppap'
+			  AND ipid.ipid_status_flg IS NULL
 		`, now, body.CreatedBy, body.IpID)
 		return err
 	}
 
 	if n == 0 {
-		if err := markAPQPNullStatusAsDraft(); err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "update apqp draft status failed", "detail": err.Error()})
+		if err := markProjectItemDetailsAsDraft(); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "update draft status failed", "detail": err.Error()})
 		}
 
 		if _, err := tx.Exec(`UPDATE info_project SET ip_status = ?, ip_updated_at = ?, ip_updated_by = ? WHERE ip_id = ?`, "draft", now, body.CreatedBy, body.IpID); err != nil {
@@ -1177,7 +1190,7 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 						if err != sql.ErrNoRows {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
+						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, su, lineVal, "ppap", startDate, endDate, "inprogress", "draft", now, body.CreatedBy, now, body.CreatedBy)
 						if err != nil {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
@@ -1232,7 +1245,7 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 						if err != sql.ErrNoRows {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
+						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, su, lineVal, "ppap", startDate, endDate, "inprogress", "draft", now, body.CreatedBy, now, body.CreatedBy)
 						if err != nil {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
@@ -1280,7 +1293,7 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 					if err != sql.ErrNoRows {
 						return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 					}
-					res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
+					res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, "ppap", startDate, endDate, "inprogress", "draft", now, body.CreatedBy, now, body.CreatedBy)
 					if err != nil {
 						return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 					}
@@ -1365,7 +1378,7 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 						if err != sql.ErrNoRows {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
+						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, su, lineVal, "ppap", startDate, endDate, "inprogress", "draft", now, body.CreatedBy, now, body.CreatedBy)
 						if err != nil {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
@@ -1414,7 +1427,7 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 						if err != sql.ErrNoRows {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
-						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, su, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
+						res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, su, lineVal, "ppap", startDate, endDate, "inprogress", "draft", now, body.CreatedBy, now, body.CreatedBy)
 						if err != nil {
 							return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 						}
@@ -1461,7 +1474,7 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 				if err != sql.ErrNoRows {
 					return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 				}
-				res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, suVal, lineVal, "ppap", startDate, endDate, "inprogress", now, body.CreatedBy, now, body.CreatedBy)
+				res2, err := tx.Exec(`INSERT INTO info_project_item_detail (ref_id, sd_id, su_id, ipid_line_code, ipid_type, ipid_start_date, ipid_end_date, ipid_status, ipid_status_flg, ipid_created_at, ipid_created_by, ipid_updated_at, ipid_updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ipiID, sd, suVal, lineVal, "ppap", startDate, endDate, "inprogress", "draft", now, body.CreatedBy, now, body.CreatedBy)
 				if err != nil {
 					return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 				}
@@ -1472,8 +1485,8 @@ func InsertPPAPItemStep4Draft(c *fiber.Ctx, db *sqlx.DB) error {
 		}
 	}
 
-	if err := markAPQPNullStatusAsDraft(); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "update apqp draft status failed", "detail": err.Error()})
+	if err := markProjectItemDetailsAsDraft(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "update draft status failed", "detail": err.Error()})
 	}
 
 	// mark project as draft when all inserts/updates succeeded

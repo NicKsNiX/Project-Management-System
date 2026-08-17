@@ -84,12 +84,12 @@ func main() {
 	// CORS middleware - allow browser origin to call this API
 	// English: allow frontend origin
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://192.168.161.205:4009",
+		AllowOrigins:     "http://192.168.161.205:4009,https://pms-demo.tbkk.co.th",
 		AllowMethods:     "GET,POST,HEAD,PUT,DELETE,OPTIONS",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
 		AllowCredentials: true,
 	}))
-	// OOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o apiTrackingSystem9.exe .
+	// GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o apiTrackingSystem9.exe .
 	// health check
 	// English: simple health route
 	app.Get("/health", func(c *fiber.Ctx) error {
